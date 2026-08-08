@@ -5,9 +5,11 @@
 pub mod debug;
 pub mod discovery;
 pub mod error;
+pub mod filter;
 pub mod focus;
 pub mod grid;
 pub mod image;
 pub mod pipeline;
 pub mod registration;
 pub mod tiff_io;
+pub mod weights;

@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
+use crate::filter::box_sum;
 use crate::image::{FrameInfo, ScratchPlane};
 use crate::pipeline::{FocusMap, FocusMetric, Image, Transform};
 
@@ -64,7 +65,7 @@ impl WindowedLaplacian {
 
             let luma = to_luma(&band, info, read_rows);
             let energy = laplacian_energy(&luma, info.width, read_rows);
-            let summed = window_sum(&energy, info.width, read_rows, self.radius);
+            let summed = box_sum(&energy, info.width, read_rows, self.radius);
 
             let out = plane.rows_mut(y0, rows)?;
             for r in 0..rows {
@@ -163,42 +164,6 @@ fn laplacian_energy(luma: &[f32], width: u32, rows: u32) -> Vec<f32> {
     out
 }
 
-/// Sum over a `(2*radius+1)` square window, separably, with clamped edges.
-///
-/// Separable running sums keep this O(1) per pixel regardless of window size, which
-/// is what makes a large window affordable on a 50 MP frame.
-fn window_sum(energy: &[f32], width: u32, rows: u32, radius: u32) -> Vec<f32> {
-    let (w, h, r) = (width as i64, rows as i64, radius as i64);
-
-    // Edges replicate, so out-of-range taps repeat the border sample. The running
-    // sum must therefore always drop one tap and take one — clamped, not skipped;
-    // skipping would silently shrink the window near the borders and report the
-    // frame edge as less in focus than it is.
-    let mut horizontal = vec![0f32; energy.len()];
-    for y in 0..h {
-        let row = &energy[(y * w) as usize..][..w as usize];
-        let tap = |x: i64| row[x.clamp(0, w - 1) as usize];
-        let mut acc: f32 = (-r..=r).map(tap).sum();
-        for x in 0..w {
-            horizontal[(y * w + x) as usize] = acc;
-            acc -= tap(x - r);
-            acc += tap(x + r + 1);
-        }
-    }
-
-    let mut out = vec![0f32; energy.len()];
-    for x in 0..w {
-        let tap = |y: i64| horizontal[(y.clamp(0, h - 1) * w + x) as usize];
-        let mut acc: f32 = (-r..=r).map(tap).sum();
-        for y in 0..h {
-            out[(y * w + x) as usize] = acc;
-            acc -= tap(y - r);
-            acc += tap(y + r + 1);
-        }
-    }
-    out
-}
-
 fn file_stem(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -270,28 +235,6 @@ mod tests {
             sharp_total > soft_total * 10.0,
             "sharp {sharp_total:.4} should dominate soft {soft_total:.4}"
         );
-    }
-
-    #[test]
-    fn window_sum_matches_a_naive_sum() {
-        let (w, h, r) = (9u32, 7u32, 2u32);
-        let energy: Vec<f32> = (0..w * h).map(|i| (i % 5) as f32).collect();
-        let got = window_sum(&energy, w, h, r);
-
-        for y in 0..h as i64 {
-            for x in 0..w as i64 {
-                let mut want = 0.0;
-                for dy in -(r as i64)..=r as i64 {
-                    for dx in -(r as i64)..=r as i64 {
-                        let cy = (y + dy).clamp(0, h as i64 - 1);
-                        let cx = (x + dx).clamp(0, w as i64 - 1);
-                        want += energy[(cy * w as i64 + cx) as usize];
-                    }
-                }
-                let have = got[(y * w as i64 + x) as usize];
-                assert!((have - want).abs() < 1e-3, "at {x},{y}: {have} != {want}");
-            }
-        }
     }
 
     #[test]
