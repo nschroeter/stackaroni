@@ -1,0 +1,150 @@
+//! Frame geometry, sRGB transfer functions, and the disk-backed plane that stage
+//! outputs are stored in.
+
+use std::fs::OpenOptions;
+use std::path::Path;
+
+use anyhow::{Context, Result, ensure};
+use memmap2::MmapMut;
+
+/// Shape and sample layout of one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameInfo {
+    pub width: u32,
+    pub height: u32,
+    pub samples: u16,
+    pub bits_per_sample: u8,
+}
+
+impl FrameInfo {
+    /// Samples in one row, i.e. `width * samples`.
+    pub fn row_len(&self) -> usize {
+        self.width as usize * self.samples as usize
+    }
+}
+
+/// sRGB EOTF: encoded value in `[0,1]` to linear light.
+pub fn srgb_to_linear(v: f32) -> f32 {
+    if v <= 0.04045 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// Inverse sRGB EOTF: linear light to encoded value in `[0,1]`.
+///
+/// Applied before quantizing back to 16 bits — writing linear light into the TIFF
+/// would make the file read far too dark in any normal viewer.
+pub fn linear_to_srgb(v: f32) -> f32 {
+    if v <= 0.0031308 {
+        v * 12.92
+    } else {
+        1.055 * v.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// Single-channel `f32` plane backed by a file on disk.
+///
+/// Backs `FocusMap` and `WeightMaps`. The OS pages rows in on demand, so holding a
+/// slice over the whole plane does not mean the whole plane is resident — which is
+/// what lets `&[FocusMap]` cover a 100-frame stack without 20 GB of RAM.
+pub struct ScratchPlane {
+    map: MmapMut,
+    width: u32,
+    height: u32,
+}
+
+impl ScratchPlane {
+    /// Create (or truncate) a plane of `width * height` samples at `path`.
+    pub fn create(path: &Path, width: u32, height: u32) -> Result<Self> {
+        let len = width as u64 * height as u64 * size_of::<f32>() as u64;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .with_context(|| format!("creating scratch plane {}", path.display()))?;
+        file.set_len(len)?;
+        // SAFETY: we own the file for the lifetime of the map and no other process
+        // writes it; the scratch directory is per-run.
+        let map = unsafe { MmapMut::map_mut(&file)? };
+        Ok(Self { map, width, height })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    /// Read-only view of `count` rows starting at `y0`.
+    pub fn rows(&self, y0: u32, count: u32) -> Result<&[f32]> {
+        let (start, len) = self.span(y0, count)?;
+        Ok(&bytemuck::cast_slice(&self.map)[start..start + len])
+    }
+
+    /// Writable view of `count` rows starting at `y0`.
+    pub fn rows_mut(&mut self, y0: u32, count: u32) -> Result<&mut [f32]> {
+        let (start, len) = self.span(y0, count)?;
+        Ok(&mut bytemuck::cast_slice_mut(&mut self.map)[start..start + len])
+    }
+
+    fn span(&self, y0: u32, count: u32) -> Result<(usize, usize)> {
+        ensure!(
+            y0.checked_add(count).is_some_and(|end| end <= self.height),
+            "rows {y0}..{} out of bounds for plane of height {}",
+            y0 as u64 + count as u64,
+            self.height
+        );
+        let w = self.width as usize;
+        Ok((y0 as usize * w, count as usize * w))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn srgb_round_trips() {
+        for &v in &[0.0, 0.002, 0.04045, 0.5, 1.0] {
+            let back = linear_to_srgb(srgb_to_linear(v));
+            assert!((back - v).abs() < 1e-6, "{v} -> {back}");
+        }
+    }
+
+    #[test]
+    fn srgb_to_linear_darkens_midtones() {
+        // The whole point of the conversion: 0.5 encoded is ~0.214 linear, not 0.5.
+        assert!((srgb_to_linear(0.5) - 0.2140).abs() < 1e-3);
+    }
+
+    #[test]
+    fn scratch_plane_round_trips_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plane.f32");
+        let mut plane = ScratchPlane::create(&path, 4, 3).unwrap();
+
+        plane
+            .rows_mut(1, 1)
+            .unwrap()
+            .copy_from_slice(&[1.0, 2.0, 3.0, 4.0]);
+
+        assert_eq!(plane.rows(1, 1).unwrap(), &[1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(plane.rows(0, 1).unwrap(), &[0.0; 4]);
+        assert_eq!(plane.rows(0, 3).unwrap().len(), 12);
+    }
+
+    #[test]
+    fn scratch_plane_rejects_out_of_bounds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plane = ScratchPlane::create(&dir.path().join("p.f32"), 4, 3).unwrap();
+        assert!(plane.rows(2, 2).is_err());
+        assert!(plane.rows_mut(3, 1).is_err());
+        assert!(plane.rows(0, u32::MAX).is_err());
+    }
+}
