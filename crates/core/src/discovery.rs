@@ -2,8 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
-
+use crate::error::{Error, Result};
 use crate::image::FrameInfo;
 use crate::tiff_io::probe;
 
@@ -36,22 +35,21 @@ pub struct StackProbe {
 /// uses `A1_00001.tif`.
 pub fn discover_stack(dir: &Path) -> Result<Stack> {
     let mut frames = Vec::new();
-    let entries =
-        std::fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| Error::io(dir, e))?;
 
     for entry in entries {
-        let path = entry?.path();
+        let path = entry.map_err(|e| Error::io(dir, e))?.path();
         if is_frame(&path) {
             frames.push(path);
         }
     }
     frames.sort();
 
-    ensure!(
-        !frames.is_empty(),
-        "{}: no TIFF frames found",
-        dir.display()
-    );
+    if frames.is_empty() {
+        return Err(Error::NoFrames {
+            dir: dir.to_path_buf(),
+        });
+    }
 
     Ok(Stack {
         name: dir
@@ -66,9 +64,9 @@ pub fn discover_stack(dir: &Path) -> Result<Stack> {
 /// Collect every stack directory under `root`, sorted by name.
 pub fn discover_test_set(root: &Path) -> Result<Vec<Stack>> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
-        .with_context(|| format!("reading test set {}", root.display()))?
-        .map(|e| e.map(|e| e.path()))
-        .collect::<Result<Vec<_>, _>>()?
+        .map_err(|e| Error::io(root, e))?
+        .map(|e| e.map(|e| e.path()).map_err(|e| Error::io(root, e)))
+        .collect::<Result<Vec<_>>>()?
         .into_iter()
         .filter(|p| p.is_dir())
         .collect();
@@ -77,11 +75,11 @@ pub fn discover_test_set(root: &Path) -> Result<Vec<Stack>> {
     // A directory with no TIFFs isn't a stack; skip it rather than failing the run.
     let stacks: Vec<Stack> = dirs.iter().filter_map(|d| discover_stack(d).ok()).collect();
 
-    ensure!(
-        !stacks.is_empty(),
-        "{}: contains no stack directories",
-        root.display()
-    );
+    if stacks.is_empty() {
+        return Err(Error::NoStacks {
+            root: root.to_path_buf(),
+        });
+    }
     Ok(stacks)
 }
 
@@ -99,17 +97,16 @@ impl Stack {
         let info = frames[0].1;
         for (path, other) in &frames[1..] {
             if *other != info {
-                bail!(
-                    "{}: {}x{} {}-bit, but {} is {}x{} {}-bit — frames in a stack must match",
-                    path.display(),
-                    other.width,
-                    other.height,
-                    other.bits_per_sample,
-                    frames[0].0.display(),
-                    info.width,
-                    info.height,
-                    info.bits_per_sample,
-                );
+                return Err(Error::Geometry {
+                    path: path.clone(),
+                    width: other.width,
+                    height: other.height,
+                    bits: other.bits_per_sample,
+                    reference: frames[0].0.clone(),
+                    ref_width: info.width,
+                    ref_height: info.height,
+                    ref_bits: info.bits_per_sample,
+                });
             }
         }
 

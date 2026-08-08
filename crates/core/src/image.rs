@@ -4,8 +4,9 @@
 use std::fs::OpenOptions;
 use std::path::Path;
 
-use anyhow::{Context, Result, ensure};
 use memmap2::MmapMut;
+
+use crate::error::{Error, Result};
 
 /// Shape and sample layout of one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,17 +60,23 @@ impl ScratchPlane {
     /// Create (or truncate) a plane of `width * height` samples at `path`.
     pub fn create(path: &Path, width: u32, height: u32) -> Result<Self> {
         let len = width as u64 * height as u64 * size_of::<f32>() as u64;
+        let scratch = |source| Error::Scratch {
+            path: path.to_path_buf(),
+            source,
+        };
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .open(path)
-            .with_context(|| format!("creating scratch plane {}", path.display()))?;
-        file.set_len(len)?;
+            .map_err(scratch)?;
+        file.set_len(len).map_err(scratch)?;
         // SAFETY: we own the file for the lifetime of the map and no other process
         // writes it; the scratch directory is per-run.
-        let map = unsafe { MmapMut::map_mut(&file)? };
+        let map = unsafe { MmapMut::map_mut(&file) }.map_err(scratch)?;
+
         Ok(Self { map, width, height })
     }
 
@@ -94,12 +101,14 @@ impl ScratchPlane {
     }
 
     fn span(&self, y0: u32, count: u32) -> Result<(usize, usize)> {
-        ensure!(
-            y0.checked_add(count).is_some_and(|end| end <= self.height),
-            "rows {y0}..{} out of bounds for plane of height {}",
-            y0 as u64 + count as u64,
-            self.height
-        );
+        let end = y0 as u64 + count as u64;
+        if end > self.height as u64 {
+            return Err(Error::Bounds {
+                start: y0 as u64,
+                end,
+                height: self.height,
+            });
+        }
         let w = self.width as usize;
         Ok((y0 as usize * w, count as usize * w))
     }
@@ -143,8 +152,8 @@ mod tests {
     fn scratch_plane_rejects_out_of_bounds() {
         let dir = tempfile::tempdir().unwrap();
         let mut plane = ScratchPlane::create(&dir.path().join("p.f32"), 4, 3).unwrap();
-        assert!(plane.rows(2, 2).is_err());
-        assert!(plane.rows_mut(3, 1).is_err());
-        assert!(plane.rows(0, u32::MAX).is_err());
+        assert!(matches!(plane.rows(2, 2), Err(Error::Bounds { .. })));
+        assert!(matches!(plane.rows_mut(3, 1), Err(Error::Bounds { .. })));
+        assert!(matches!(plane.rows(0, u32::MAX), Err(Error::Bounds { .. })));
     }
 }

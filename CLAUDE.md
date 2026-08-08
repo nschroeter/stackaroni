@@ -54,18 +54,32 @@ benchmarked against each other without rewriting the app:
 
 ```rust
 trait Registration {
-    fn align(&self, reference: &Image, target: &Image) -> Transform;
+    fn align(&self, reference: &Image, target: &Image) -> Result<Transform>;
 }
 trait FocusMetric {
-    fn evaluate(&self, image: &Image) -> FocusMap;
+    fn evaluate(&self, image: &Image) -> Result<FocusMap>;
 }
 trait WeightEstimator {
-    fn weights(&self, focus_maps: &[FocusMap]) -> WeightMaps;
+    fn weights(&self, focus_maps: &[FocusMap]) -> Result<WeightMaps>;
 }
 trait ImageFusion {
-    fn fuse(&self, images: &[Image], weights: &WeightMaps) -> Image;
+    fn fuse(&self, images: &[Image], weights: &WeightMaps) -> Result<Image>;
 }
 ```
+
+`Result` is `stackaroni_core::error::Result`, over a typed `Error` enum rather than
+`anyhow`. `core` is a library boundary consumed by both `cli` and `app`, and the
+debug/diagnostic view needs to tell failure kinds apart — "frame 47 failed to decode"
+(`Error::Decode`) and "ran out of scratch disk" (`Error::Scratch`) are different
+situations for the user. `cli` and `app` still use `anyhow` for their own internal
+error handling; `core::Error` converts into it via `?`.
+
+None of these types owns pixel data. `Image` reads bands from its TIFF on demand;
+`FocusMap` and `WeightMaps` are mmapped scratch planes. So `&[Image]` over a
+100-frame stack costs handles, not 60 GB — the streaming strategy lives inside each
+implementation, never in these signatures. Extra state a stage needs (a fusion output
+path, the guide images for edge-aware weighting) goes into the implementing type via
+its constructor, not into the trait method.
 
 Every stage must be able to dump a debug-visualizable intermediate output when run via the CLI:
 alignment overlay/diff, focus-measure heatmap, weight map, and the final fused image. This is

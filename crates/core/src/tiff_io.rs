@@ -7,13 +7,13 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
 use tiff::ColorType;
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::encoder::{TiffEncoder, colortype};
 
+use crate::error::{Error, Result};
 use crate::image::{FrameInfo, linear_to_srgb, srgb_to_linear};
 
 /// Rows buffered per output strip. Small enough to stay cheap, large enough that
@@ -35,6 +35,7 @@ pub fn probe(path: &Path) -> Result<FrameInfo> {
 /// strip (a row is a direct seek); the synthetic stack is Deflate with 36 rows per
 /// strip, where the cache is what stops overlapping bands re-inflating the same data.
 pub struct FrameReader {
+    path: PathBuf,
     decoder: Decoder<BufReader<File>>,
     info: FrameInfo,
     rows_per_strip: u32,
@@ -44,24 +45,33 @@ pub struct FrameReader {
 
 impl FrameReader {
     pub fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-        let mut decoder = Decoder::new(BufReader::new(file))
-            .with_context(|| format!("reading TIFF header of {}", path.display()))?;
+        let decode = |source| Error::Decode {
+            path: path.to_path_buf(),
+            source,
+        };
 
-        let (width, height) = decoder.dimensions()?;
-        let color = decoder.colortype()?;
+        let file = File::open(path).map_err(|e| Error::io(path, e))?;
+        let mut decoder = Decoder::new(BufReader::new(file)).map_err(decode)?;
+
+        let (width, height) = decoder.dimensions().map_err(decode)?;
+        let color = decoder.colortype().map_err(decode)?;
         let ColorType::RGB(16) = color else {
-            bail!(
-                "{}: expected 16-bit RGB, found {color:?} — input must be 16-bit TIFF \
-                 developed outside the app",
-                path.display()
-            );
+            return Err(Error::UnsupportedFormat {
+                path: path.to_path_buf(),
+                found: format!("{color:?}"),
+            });
         };
 
         let rows_per_strip = decoder.chunk_dimensions().1;
-        ensure!(rows_per_strip > 0, "{}: zero-height strips", path.display());
+        if rows_per_strip == 0 {
+            return Err(Error::UnsupportedFormat {
+                path: path.to_path_buf(),
+                found: "zero-height strips".into(),
+            });
+        }
 
         Ok(Self {
+            path: path.to_path_buf(),
             decoder,
             info: FrameInfo {
                 width,
@@ -79,23 +89,30 @@ impl FrameReader {
         self.info
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Fill `out` with `count` rows of linear-light RGB starting at row `y0`.
     ///
     /// `out` must be exactly `count * info.row_len()` samples long.
     pub fn read_rows(&mut self, y0: u32, count: u32, out: &mut [f32]) -> Result<()> {
         let row_len = self.info.row_len();
-        ensure!(
-            out.len() == count as usize * row_len,
-            "output buffer is {} samples, expected {}",
-            out.len(),
-            count as usize * row_len
-        );
-        ensure!(
-            y0.checked_add(count).is_some_and(|e| e <= self.info.height),
-            "rows {y0}..{} out of bounds for frame of height {}",
-            y0 as u64 + count as u64,
-            self.info.height
-        );
+        let want = count as usize * row_len;
+        if out.len() != want {
+            return Err(Error::BufferSize {
+                got: out.len(),
+                want,
+            });
+        }
+        let end = y0 as u64 + count as u64;
+        if end > self.info.height as u64 {
+            return Err(Error::Bounds {
+                start: y0 as u64,
+                end,
+                height: self.info.height,
+            });
+        }
 
         for i in 0..count {
             let y = y0 + i;
@@ -111,8 +128,18 @@ impl FrameReader {
         let pos = match self.cache.iter().position(|(i, _)| *i == index) {
             Some(pos) => pos,
             None => {
-                let DecodingResult::U16(raw) = self.decoder.read_chunk(index)? else {
-                    bail!("expected 16-bit samples in strip {index}");
+                let chunk = self
+                    .decoder
+                    .read_chunk(index)
+                    .map_err(|source| Error::Decode {
+                        path: self.path.clone(),
+                        source,
+                    })?;
+                let DecodingResult::U16(raw) = chunk else {
+                    return Err(Error::UnsupportedFormat {
+                        path: self.path.clone(),
+                        found: "non-16-bit samples".into(),
+                    });
                 };
                 let samples = raw
                     .iter()
@@ -138,16 +165,23 @@ pub fn write_rgb16_srgb(
     info: FrameInfo,
     mut fill_row: impl FnMut(u32, &mut [f32]) -> Result<()>,
 ) -> Result<()> {
-    ensure!(
-        info.samples == 3,
-        "output must be RGB, got {} samples",
-        info.samples
-    );
+    if info.samples != 3 {
+        return Err(Error::UnsupportedFormat {
+            path: path.to_path_buf(),
+            found: format!("{} samples per pixel on output", info.samples),
+        });
+    }
+    let encode = |source| Error::Encode {
+        path: path.to_path_buf(),
+        source,
+    };
 
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let mut encoder = TiffEncoder::new(BufWriter::new(file))?;
-    let mut image = encoder.new_image::<colortype::RGB16>(info.width, info.height)?;
-    image.rows_per_strip(OUT_ROWS_PER_STRIP)?;
+    let file = File::create(path).map_err(|e| Error::io(path, e))?;
+    let mut encoder = TiffEncoder::new(BufWriter::new(file)).map_err(encode)?;
+    let mut image = encoder
+        .new_image::<colortype::RGB16>(info.width, info.height)
+        .map_err(encode)?;
+    image.rows_per_strip(OUT_ROWS_PER_STRIP).map_err(encode)?;
 
     let row_len = info.row_len();
     let mut row = vec![0f32; row_len];
@@ -156,10 +190,12 @@ pub fn write_rgb16_srgb(
 
     while y < info.height {
         let wanted = image.next_strip_sample_count() as usize;
-        ensure!(
-            wanted > 0 && wanted.is_multiple_of(row_len),
-            "strip of {wanted} samples is not a whole number of {row_len}-sample rows"
-        );
+        if wanted == 0 || !wanted.is_multiple_of(row_len) {
+            return Err(Error::BufferSize {
+                got: wanted,
+                want: row_len,
+            });
+        }
         strip.clear();
         strip.reserve(wanted);
         while strip.len() < wanted {
@@ -167,10 +203,10 @@ pub fn write_rgb16_srgb(
             strip.extend(row.iter().map(|&v| quantize(v)));
             y += 1;
         }
-        image.write_strip(&strip)?;
+        image.write_strip(&strip).map_err(encode)?;
     }
 
-    image.finish()?;
+    image.finish().map_err(encode)?;
     Ok(())
 }
 
@@ -301,10 +337,21 @@ mod tests {
 
         let mut reader = FrameReader::open(&path).unwrap();
         let mut buf = vec![0f32; info.row_len() * 5];
-        assert!(reader.read_rows(18, 5, &mut buf).is_err());
-        assert!(
-            reader.read_rows(0, 4, &mut buf).is_err(),
-            "buffer length mismatch"
-        );
+        assert!(matches!(
+            reader.read_rows(18, 5, &mut buf),
+            Err(Error::Bounds { .. })
+        ));
+        assert!(matches!(
+            reader.read_rows(0, 4, &mut buf),
+            Err(Error::BufferSize { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_non_tiff_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not.tif");
+        std::fs::write(&path, b"definitely not a tiff").unwrap();
+        assert!(matches!(probe(&path), Err(Error::Decode { .. })));
     }
 }
