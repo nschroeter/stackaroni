@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use stackaroni_core::discovery::discover_stack;
 use stackaroni_core::grid::Grid;
-use stackaroni_core::pipeline::{Image, Transform};
+use stackaroni_core::pipeline::{FocusMetric, Image, Transform};
 use stackaroni_core::registration::{correlate, correlate_similarity};
 
 const LEVELS: [u32; 4] = [1, 2, 3, 4];
@@ -274,4 +274,61 @@ fn similarity_noise_floor() {
         }
     }
     println!();
+}
+
+/// Focus-map heatmaps for visual inspection, per CLAUDE.md's debug-output rule.
+#[test]
+#[ignore = "requires test-data/, run with --release"]
+fn write_focus_heatmaps() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/synthetic_50");
+    let Ok(stack) = discover_stack(&dir) else {
+        return;
+    };
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug-out");
+    let scratch = out.join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+
+    // Frame 1 is focused at the front, frame 25 mid-stack, frame 50 at the back.
+    for index in [0usize, 24, 49] {
+        let metric = stackaroni_core::focus::WindowedLaplacian::new(
+            4,
+            &scratch,
+            std::collections::HashMap::new(),
+        );
+        let map = metric
+            .evaluate(&Image::open(&stack.frames[index]).unwrap())
+            .unwrap();
+        stackaroni_core::debug::write_plane(&out.join(format!("focus_{:03}.png", index + 1)), &map)
+            .unwrap();
+    }
+    println!("wrote focus heatmaps to {}", out.display());
+}
+
+/// Cost of one focus map on a full 50 MP frame — the number that decides whether
+/// T9 can afford this per frame across a 100-frame stack.
+#[test]
+#[ignore = "requires test-data/, run with --release"]
+fn focus_metric_cost_on_a_real_frame() {
+    let Some(frames) = frames() else { return };
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug-out/scratch");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let image = Image::open(&frames[frames.len() / 2]).unwrap();
+    let info = image.info();
+    let metric =
+        stackaroni_core::focus::WindowedLaplacian::new(4, &out, std::collections::HashMap::new());
+
+    let start = Instant::now();
+    let map = metric.evaluate(&image).unwrap();
+    let secs = start.elapsed().as_secs_f32();
+    let mb = info.width as f64 * info.height as f64 * 4.0 / 1e6;
+
+    println!(
+        "{}x{}: {secs:.1}s, plane {mb:.0} MB => 100 frames = {:.0} min, {:.0} GB scratch",
+        info.width,
+        info.height,
+        secs * 100.0 / 60.0,
+        mb * 100.0 / 1000.0
+    );
+    drop(map);
 }

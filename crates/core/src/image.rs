@@ -100,6 +100,28 @@ impl ScratchPlane {
         Ok(&mut bytemuck::cast_slice_mut(&mut self.map)[start..start + len])
     }
 
+    /// Single sample, clamped to the plane's edges.
+    pub fn at(&self, x: i64, y: i64) -> f32 {
+        let x = x.clamp(0, self.width as i64 - 1) as usize;
+        let y = y.clamp(0, self.height as i64 - 1) as usize;
+        bytemuck::cast_slice::<u8, f32>(&self.map)[y * self.width as usize + x]
+    }
+
+    /// Bilinear sample, clamped at the edges.
+    ///
+    /// Edge clamping rather than zero-fill: a focus map warped with zero borders
+    /// would read as "nothing in focus" along the frame edge and pull the weight
+    /// map with it.
+    pub fn sample(&self, x: f32, y: f32) -> f32 {
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let (ix, iy) = (x0 as i64, y0 as i64);
+
+        let top = self.at(ix, iy) * (1.0 - fx) + self.at(ix + 1, iy) * fx;
+        let bottom = self.at(ix, iy + 1) * (1.0 - fx) + self.at(ix + 1, iy + 1) * fx;
+        top * (1.0 - fy) + bottom * fy
+    }
+
     fn span(&self, y0: u32, count: u32) -> Result<(usize, usize)> {
         let end = y0 as u64 + count as u64;
         if end > self.height as u64 {

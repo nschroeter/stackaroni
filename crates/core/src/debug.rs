@@ -11,6 +11,7 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::grid::Grid;
+use crate::image::ScratchPlane;
 use crate::pipeline::Transform;
 
 /// Longest edge of a debug image. Full-resolution debug output would be 100 MB a
@@ -43,6 +44,34 @@ pub fn write_alignment_overlay(
         rgb.push(0);
     }
     write_png(path, w, h, &rgb, png::ColorType::Rgb)
+}
+
+/// Focus map or weight plane as a greyscale PNG.
+///
+/// Focus energy spans several orders of magnitude — a few high-contrast edges would
+/// otherwise saturate the image and leave everything else black — so this is
+/// log-compressed before scaling. Bright means more in focus.
+pub fn write_plane(path: &Path, plane: &ScratchPlane) -> Result<()> {
+    let factor = plane.width().max(plane.height()).div_ceil(MAX_EDGE).max(1);
+    let (w, h) = (
+        (plane.width() / factor).max(1),
+        (plane.height() / factor).max(1),
+    );
+
+    let mut grid = Grid::new(w, h);
+    let inv = 1.0 / (factor * factor) as f32;
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = 0.0;
+            for sy in 0..factor {
+                for sx in 0..factor {
+                    acc += plane.at((x * factor + sx) as i64, (y * factor + sy) as i64);
+                }
+            }
+            grid.data[y as usize * w as usize + x as usize] = (acc * inv).max(0.0).ln_1p();
+        }
+    }
+    write_grid(path, &grid)
 }
 
 /// Single-channel grid as a greyscale PNG.
