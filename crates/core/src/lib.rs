@@ -7,6 +7,7 @@ pub mod discovery;
 pub mod error;
 pub mod filter;
 pub mod focus;
+pub mod fusion;
 pub mod grid;
 pub mod image;
 pub mod pipeline;
