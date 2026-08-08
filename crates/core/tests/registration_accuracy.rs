@@ -25,8 +25,8 @@ use std::time::Instant;
 
 use stackaroni_core::discovery::discover_stack;
 use stackaroni_core::grid::Grid;
-use stackaroni_core::pipeline::Image;
-use stackaroni_core::registration::correlate;
+use stackaroni_core::pipeline::{Image, Transform};
+use stackaroni_core::registration::{correlate, correlate_similarity};
 
 const LEVELS: [u32; 4] = [1, 2, 3, 4];
 const INJECTED: [(f32, f32); 3] = [(3.37, -7.62), (0.5, 0.5), (-11.25, 4.8)];
@@ -132,6 +132,30 @@ fn registration_accuracy() {
         );
     }
 
+    println!("\n=== 5. T5b: similarity correction (Reddy & Chatterji 1996) ===");
+    println!(
+        "{:>5}  {:>4}  {:>9}  {:>8}  {:>13}  {:>13}",
+        "level", "sep", "scale", "rot deg", "spread before", "spread after"
+    );
+    for level in [2u32, 3] {
+        for sep in [1usize, 5, 20] {
+            let a = grid(&frames, mid, level);
+            let b = grid(&frames, mid + sep, level);
+            let scale_px = (1u32 << level) as f32;
+
+            let est = correlate_similarity(&a, &b);
+            // Bring the target back onto the reference and re-measure.
+            let corrected = b.warped(est.transform.inverse());
+
+            let before = region_spread(&a, &b) * scale_px;
+            let after = region_spread(&a, &corrected) * scale_px;
+            println!(
+                "{level:>5}  {sep:>4}  {:>9.5}  {:>8.3}  {before:>13.3}  {after:>13.3}",
+                est.transform.scale, est.rotation_degrees
+            );
+        }
+    }
+
     // If the frames differ by pure translation, every region agrees on the shift.
     // If focus breathing is changing magnification, opposite regions disagree
     // symmetrically — which a translation-only Transform cannot represent.
@@ -166,6 +190,18 @@ fn registration_accuracy() {
     println!();
 }
 
+/// Largest disagreement between opposite halves, in grid pixels. Zero if the two
+/// frames really do differ by a pure translation.
+fn region_spread(a: &Grid, b: &Grid) -> f32 {
+    let (hw, hh) = (a.width / 2, a.height / 2);
+    let half = |g: &Grid, x0, y0| g.crop(x0, y0, hw, hh);
+    let (lx, _) = correlate(&half(a, 0, hh / 2), &half(b, 0, hh / 2));
+    let (rx, _) = correlate(&half(a, hw, hh / 2), &half(b, hw, hh / 2));
+    let (_, ty) = correlate(&half(a, hw / 2, 0), &half(b, hw / 2, 0));
+    let (_, by) = correlate(&half(a, hw / 2, hh), &half(b, hw / 2, hh));
+    (lx - rx).abs().max((ty - by).abs())
+}
+
 #[test]
 #[ignore = "requires test-data/, run with --release"]
 fn write_alignment_overlays() {
@@ -178,15 +214,64 @@ fn write_alignment_overlays() {
         let a = grid(&frames, mid, 3);
         let b = grid(&frames, mid + sep, 3);
         let (dx, dy) = correlate(&a, &b);
-        let t = stackaroni_core::pipeline::Transform { dx, dy };
         stackaroni_core::debug::write_alignment_overlay(
-            &out.join(format!("align_sep{sep:02}.png")),
+            &out.join(format!("align_sep{sep:02}_translation.png")),
             &a,
             &b,
-            t,
+            Transform::translation(dx, dy),
         )
         .unwrap();
-        println!("sep {sep}: global shift ({dx:.3},{dy:.3}) at level 3");
+
+        let est = correlate_similarity(&a, &b);
+        stackaroni_core::debug::write_alignment_overlay(
+            &out.join(format!("align_sep{sep:02}_similarity.png")),
+            &a,
+            &b,
+            est.transform,
+        )
+        .unwrap();
+        println!(
+            "sep {sep}: translation ({dx:.3},{dy:.3}) vs similarity {:?}",
+            est.transform
+        );
     }
     println!("wrote {}", out.display());
+}
+
+/// Noise floor of the `region_spread` metric and of the estimator on *shared*
+/// content: warp one real frame by a known similarity, estimate it, correct, and
+/// measure. Whatever residual survives here is measurement error, not misalignment,
+/// and sets the bar the real-pair numbers should be read against.
+#[test]
+#[ignore = "requires test-data/, run with --release"]
+fn similarity_noise_floor() {
+    let Some(frames) = frames() else { return };
+    let mid = frames.len() / 2;
+
+    println!("\n=== control: known similarity on shared content ===");
+    println!(
+        "{:>5}  {:>9}  {:>9}  {:>12}  {:>12}",
+        "level", "true", "estimated", "spread before", "spread after"
+    );
+    for level in [2u32, 3] {
+        let a = grid(&frames, mid, level);
+        for truth in [0.999f32, 0.994, 0.958] {
+            let t = Transform {
+                scale: truth,
+                dx: 0.0,
+                dy: 0.0,
+            };
+            let b = a.warped(t);
+            let est = correlate_similarity(&a, &b);
+            let corrected = b.warped(est.transform.inverse());
+            let px = (1u32 << level) as f32;
+            println!(
+                "{level:>5}  {truth:>9.5}  {:>9.5}  {:>12.3}  {:>12.3}",
+                est.transform.scale,
+                region_spread(&a, &b) * px,
+                region_spread(&a, &corrected) * px
+            );
+        }
+    }
+    println!();
 }

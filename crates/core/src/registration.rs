@@ -17,6 +17,14 @@ use crate::pipeline::{Image, Registration, Transform};
 /// Whitening regularizer, as a fraction of the strongest cross-spectrum bin.
 const WHITENING_EPS: f32 = 1e-3;
 
+/// Log-polar resampling grid. `RHO` bins span `R_MIN..r_max` logarithmically, so
+/// scale resolution is `(r_max/R_MIN)^(1/RHO)` per bin — with the defaults below
+/// that is ~0.5% per bin before sub-pixel refinement, against the ~0.145% per-frame
+/// magnification measured on `ruler`.
+const LOG_POLAR_RHO: u32 = 1024;
+const LOG_POLAR_THETA: u32 = 512;
+const LOG_POLAR_R_MIN: f32 = 4.0;
+
 /// Phase correlation at a fixed pyramid level.
 ///
 /// `level` trades resolution for robustness: adjacent frames in a focus bracket do
@@ -43,15 +51,19 @@ impl Registration for PhaseCorrelation {
     fn align(&self, reference: &Image, target: &Image) -> Result<Transform> {
         let a = Grid::from_image(reference, self.level)?;
         let b = Grid::from_image(target, self.level)?;
-        Ok(scale_up(correlate(&a, &b), self.level))
+        let est = correlate_similarity(&a, &b);
+        Ok(scale_up(est.transform, self.level))
     }
 }
 
-fn scale_up((dx, dy): (f32, f32), level: u32) -> Transform {
+/// Translations are in level pixels; convert to full resolution. Scale is a ratio,
+/// so it carries across levels unchanged.
+fn scale_up(t: Transform, level: u32) -> Transform {
     let s = (1u32 << level) as f32;
     Transform {
-        dx: dx * s,
-        dy: dy * s,
+        scale: t.scale,
+        dx: t.dx * s,
+        dy: t.dy * s,
     }
 }
 
@@ -215,10 +227,7 @@ pub fn register_stack(
         let prev = Image::open(&frames[i - 1])?;
         let curr = Image::open(&frames[i])?;
         let step = registration.align(&prev, &curr)?;
-        transforms[i] = Transform {
-            dx: transforms[i - 1].dx + step.dx,
-            dy: transforms[i - 1].dy + step.dy,
-        };
+        transforms[i] = transforms[i - 1].then(step);
         done += 1;
         progress(done, n - 1);
     }
@@ -227,15 +236,106 @@ pub fn register_stack(
         let next = Image::open(&frames[i + 1])?;
         let curr = Image::open(&frames[i])?;
         let step = registration.align(&next, &curr)?;
-        transforms[i] = Transform {
-            dx: transforms[i + 1].dx + step.dx,
-            dy: transforms[i + 1].dy + step.dy,
-        };
+        transforms[i] = transforms[i + 1].then(step);
         done += 1;
         progress(done, n - 1);
     }
 
     Ok(transforms)
+}
+
+/// A similarity estimate plus the rotation that was measured but not modelled.
+#[derive(Debug, Clone, Copy)]
+pub struct SimilarityEstimate {
+    pub transform: Transform,
+    /// Rotation in degrees, from the same log-polar correlation that gives scale.
+    ///
+    /// Not part of [`Transform`]: no rotation showed in the per-region diagnostics
+    /// on `ruler`, so it is reported as evidence rather than applied. If this starts
+    /// coming back non-zero, that is the signal to escalate to ECC affine.
+    pub rotation_degrees: f32,
+}
+
+/// Estimate a similarity transform: uniform scale then translation.
+///
+/// Reddy & Chatterji (IEEE TIP 5(8), 1996, 1266-1271). The magnitude of an image's
+/// Fourier transform is invariant to translation, so scale can be recovered from it
+/// alone: resampled into log-polar coordinates, a uniform magnification becomes a
+/// pure shift along the log-radius axis, which the translation correlation already
+/// solves. Undo the scale, then correlate normally for the translation.
+pub fn correlate_similarity(a: &Grid, b: &Grid) -> SimilarityEstimate {
+    let (la, log_base) = log_polar(&magnitude_spectrum(a));
+    let (lb, _) = log_polar(&magnitude_spectrum(b));
+
+    let (d_rho, d_theta) = correlate(&la, &lb);
+    let scale = log_base.powf(-d_rho);
+    let rotation_degrees = -d_theta * 180.0 / LOG_POLAR_THETA as f32;
+
+    // Remove the magnification, then the residual is pure translation.
+    let unscaled = b.warped(Transform {
+        scale: 1.0 / scale,
+        dx: 0.0,
+        dy: 0.0,
+    });
+    let (dx, dy) = correlate(a, &unscaled);
+
+    SimilarityEstimate {
+        transform: Transform { scale, dx, dy },
+        rotation_degrees,
+    }
+}
+
+/// Translation-invariant magnitude spectrum, centred and high-pass filtered.
+///
+/// The high-pass is Reddy & Chatterji's `(1-X)(2-X)` with `X = cos(pi u)cos(pi v)`:
+/// without it the log-polar correlation is dominated by the low-frequency bulk that
+/// every photograph shares, which carries no scale information.
+fn magnitude_spectrum(grid: &Grid) -> Grid {
+    let fw = (grid.width as usize).next_power_of_two();
+    let fh = (grid.height as usize).next_power_of_two();
+
+    let mut planner = FftPlanner::<f32>::new();
+    let mut buf = prepare(grid, fw, fh);
+    fft2(&mut buf, fw, fh, &mut planner, false);
+
+    let mut out = Grid::new(fw as u32, fh as u32);
+    for y in 0..fh {
+        for x in 0..fw {
+            // Shift the origin to the centre so log-polar can sample radially.
+            let sx = (x + fw / 2) % fw;
+            let sy = (y + fh / 2) % fh;
+            let u = x as f32 / fw as f32 - 0.5;
+            let v = y as f32 / fh as f32 - 0.5;
+            let cross = (std::f32::consts::PI * u).cos() * (std::f32::consts::PI * v).cos();
+            let highpass = (1.0 - cross) * (2.0 - cross);
+            // log1p keeps the huge dynamic range of a magnitude spectrum usable.
+            out.data[sy * fw + sx] = (buf[y * fw + x].norm() * highpass).ln_1p();
+        }
+    }
+    out
+}
+
+/// Resample a centred spectrum into log-polar coordinates.
+///
+/// Rows are angle over `[0, pi)` — a magnitude spectrum is centrally symmetric, so
+/// half a turn covers it. Columns are log-radius. Returns the grid and the log base,
+/// which converts a shift along rho back into a scale factor.
+fn log_polar(spectrum: &Grid) -> (Grid, f32) {
+    let (cx, cy) = (spectrum.width as f32 / 2.0, spectrum.height as f32 / 2.0);
+    let r_max = cx.min(cy);
+    let log_base = (r_max / LOG_POLAR_R_MIN).powf(1.0 / LOG_POLAR_RHO as f32);
+
+    let mut out = Grid::new(LOG_POLAR_RHO, LOG_POLAR_THETA);
+    for t in 0..LOG_POLAR_THETA {
+        let theta = std::f32::consts::PI * t as f32 / LOG_POLAR_THETA as f32;
+        let (sin, cos) = theta.sin_cos();
+        for r in 0..LOG_POLAR_RHO {
+            let radius = LOG_POLAR_R_MIN * log_base.powi(r as i32);
+            out.data[t as usize * LOG_POLAR_RHO as usize + r as usize] =
+                spectrum.sample(cx + radius * cos, cy + radius * sin);
+        }
+    }
+    (out, log_base)
 }
 
 #[cfg(test)]
@@ -331,6 +431,77 @@ mod tests {
             (fx + rx).abs() < 0.1 && (fy + ry).abs() < 0.1,
             "forward ({fx:.3},{fy:.3}) reverse ({rx:.3},{ry:.3})"
         );
+    }
+
+    #[test]
+    fn recovers_uniform_scale() {
+        let a = textured(256, 256, 0.0, 0.0);
+        for want in [1.02f32, 0.97, 1.005] {
+            let b = a.warped(Transform {
+                scale: want,
+                dx: 0.0,
+                dy: 0.0,
+            });
+            let got = correlate_similarity(&a, &b).transform.scale;
+            assert!((got - want).abs() < 0.004, "want scale {want} got {got:.5}");
+        }
+    }
+
+    #[test]
+    fn recovers_scale_and_translation_together() {
+        let a = textured(256, 256, 0.0, 0.0);
+        let want = Transform {
+            scale: 1.03,
+            dx: 4.0,
+            dy: -3.0,
+        };
+        let b = a.warped(want);
+        let got = correlate_similarity(&a, &b).transform;
+        assert!((got.scale - want.scale).abs() < 0.005, "scale {got:?}");
+        assert!((got.dx - want.dx).abs() < 1.0, "dx {got:?}");
+        assert!((got.dy - want.dy).abs() < 1.0, "dy {got:?}");
+    }
+
+    #[test]
+    fn reports_no_rotation_when_there_is_none() {
+        let a = textured(256, 256, 0.0, 0.0);
+        let b = a.warped(Transform {
+            scale: 1.02,
+            dx: 2.0,
+            dy: 1.0,
+        });
+        let rot = correlate_similarity(&a, &b).rotation_degrees;
+        assert!(rot.abs() < 1.0, "unexpected rotation {rot:.3} deg");
+    }
+
+    #[test]
+    fn composition_matches_applying_transforms_in_turn() {
+        let first = Transform {
+            scale: 1.1,
+            dx: 3.0,
+            dy: -2.0,
+        };
+        let second = Transform {
+            scale: 0.95,
+            dx: -1.0,
+            dy: 4.0,
+        };
+        let (x, y) = (7.0f32, -5.0f32);
+        let (ax, ay) = first.apply(x, y);
+        let (bx, by) = second.apply(ax, ay);
+        let (cx, cy) = first.then(second).apply(x, y);
+        assert!((bx - cx).abs() < 1e-4 && (by - cy).abs() < 1e-4);
+    }
+
+    #[test]
+    fn inverse_undoes_the_transform() {
+        let t = Transform {
+            scale: 1.07,
+            dx: 5.0,
+            dy: -3.0,
+        };
+        let (x, y) = t.then(t.inverse()).apply(9.0, -4.0);
+        assert!((x - 9.0).abs() < 1e-4 && (y + 4.0).abs() < 1e-4);
     }
 
     #[test]

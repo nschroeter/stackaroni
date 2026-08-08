@@ -20,26 +20,75 @@ pub type WeightMaps = Vec<ScratchPlane>;
 
 /// Geometric correction mapping a frame onto the reference frame.
 ///
-/// Translation only, which is what phase correlation (Kuglin & Hines, 1975)
-/// estimates — and measurably **not** enough for the real stacks.
+/// A similarity: uniform scale about the image centre, then translation.
+/// Coordinates are centre-relative, so `frame_point = scale * anchor_point + (dx, dy)`.
 ///
-/// The `registration_accuracy` benchmark shows the frames differ by a uniform
-/// magnification of ~0.145% per frame: on `ruler`, opposite halves of the same
-/// adjacent pair report shifts of +3.3 px and −3.0 px, which no single `(dx, dy)`
-/// can represent. Widening this to a similarity transform (translation + uniform
-/// scale), estimated by log-polar phase correlation (Reddy & Chatterji, 1996), is
-/// the concrete next step — T5b. No rotation or shear shows in the per-region data,
-/// so a general affine model is not yet warranted.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// Scale is here because translation alone measurably could not represent this data.
+/// The `registration_accuracy` benchmark found opposite halves of a single adjacent
+/// `ruler` pair reporting +3.3 px and −2.98 px — uniform magnification of ~0.1% per
+/// frame, as `docs/algorithms.md` §10 predicts for focus breathing. Estimating scale
+/// by log-polar phase correlation (Reddy & Chatterji, 1996) drops that per-region
+/// spread from 6.30 px to 0.92 px, which is the estimator's own noise floor.
+///
+/// Rotation is deliberately absent. The same log-polar correlation measures it, and
+/// it comes back under 0.13° on every real pair tested — so it is reported as
+/// evidence in [`crate::registration::SimilarityEstimate`] rather than modelled. If
+/// it ever stops being ~0, that is the signal to escalate to ECC affine
+/// (Evangelidis & Psarakis, 2008), not before.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transform {
+    /// Uniform magnification, reference to frame. 1.0 is no change.
+    pub scale: f32,
     /// Horizontal shift in pixels, reference to frame.
     pub dx: f32,
     /// Vertical shift in pixels, reference to frame.
     pub dy: f32,
 }
 
+impl Default for Transform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
 impl Transform {
-    pub const IDENTITY: Self = Self { dx: 0.0, dy: 0.0 };
+    pub const IDENTITY: Self = Self {
+        scale: 1.0,
+        dx: 0.0,
+        dy: 0.0,
+    };
+
+    pub fn translation(dx: f32, dy: f32) -> Self {
+        Self { scale: 1.0, dx, dy }
+    }
+
+    /// Map a point given in centre-relative coordinates.
+    pub fn apply(self, x: f32, y: f32) -> (f32, f32) {
+        (self.scale * x + self.dx, self.scale * y + self.dy)
+    }
+
+    /// This transform followed by `next`.
+    ///
+    /// `next(self(p)) = s_next·(s_self·p + t_self) + t_next`, so the scales multiply
+    /// and the leading translation picks up the trailing scale. This is what chains
+    /// single-step alignments outward from the anchor.
+    pub fn then(self, next: Self) -> Self {
+        Self {
+            scale: self.scale * next.scale,
+            dx: next.scale * self.dx + next.dx,
+            dy: next.scale * self.dy + next.dy,
+        }
+    }
+
+    /// The transform undoing this one.
+    pub fn inverse(self) -> Self {
+        let inv = 1.0 / self.scale;
+        Self {
+            scale: inv,
+            dx: -self.dx * inv,
+            dy: -self.dy * inv,
+        }
+    }
 }
 
 /// A frame on disk, read a band at a time.

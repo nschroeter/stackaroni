@@ -5,7 +5,7 @@
 //! 50 MP frame is 200 MB; downsampled levels are 4^level smaller.
 
 use crate::error::Result;
-use crate::pipeline::Image;
+use crate::pipeline::{Image, Transform};
 
 /// Rec. 709 luma coefficients, applied to linear-light RGB.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
@@ -78,15 +78,26 @@ impl Grid {
 
     /// A copy displaced by `(dx, dy)` pixels, sampled bilinearly.
     ///
-    /// Used to synthesise known-shift test pairs and to render alignment overlays.
     /// Samples falling outside the source read as zero.
     pub fn shifted(&self, dx: f32, dy: f32) -> Grid {
+        self.warped(Transform::translation(dx, dy))
+    }
+
+    /// A copy under a similarity transform, sampled bilinearly.
+    ///
+    /// The transform maps source to destination about the image centre, so this
+    /// inverts it to look up where each output pixel came from. Samples outside the
+    /// source read as zero.
+    pub fn warped(&self, transform: Transform) -> Grid {
+        let inverse = transform.inverse();
+        let (cx, cy) = (self.width as f32 / 2.0, self.height as f32 / 2.0);
+
         let mut out = Grid::new(self.width, self.height);
         for y in 0..self.height {
             for x in 0..self.width {
-                let sx = x as f32 - dx;
-                let sy = y as f32 - dy;
-                out.data[y as usize * self.width as usize + x as usize] = self.sample(sx, sy);
+                let (sx, sy) = inverse.apply(x as f32 - cx, y as f32 - cy);
+                out.data[y as usize * self.width as usize + x as usize] =
+                    self.sample(sx + cx, sy + cy);
             }
         }
         out

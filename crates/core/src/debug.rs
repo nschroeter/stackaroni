@@ -28,8 +28,9 @@ pub fn write_alignment_overlay(
     target: &Grid,
     transform: Transform,
 ) -> Result<()> {
-    // `target(x) ≈ reference(x - t)`, so undo `t` to bring it back onto the reference.
-    let aligned = target.shifted(-transform.dx, -transform.dy);
+    // The transform maps reference coordinates onto the target, so invert it to
+    // bring the target back onto the reference.
+    let aligned = target.warped(transform.inverse());
 
     let r = normalize(&downsample_for_view(reference));
     let g = normalize(&downsample_for_view(&aligned));
@@ -133,7 +134,7 @@ mod tests {
         }
         let b = a.shifted(2.0, 1.0);
 
-        write_alignment_overlay(&path, &a, &b, Transform { dx: 2.0, dy: 1.0 }).unwrap();
+        write_alignment_overlay(&path, &a, &b, Transform::translation(2.0, 1.0)).unwrap();
 
         let decoder = png::Decoder::new(std::io::BufReader::new(File::open(&path).unwrap()));
         let reader = decoder.read_info().unwrap();
