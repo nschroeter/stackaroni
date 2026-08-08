@@ -11,17 +11,22 @@ source of truth for "correct."
 - UI: egui/eframe. No web/Electron/other UI stack.
 - Platforms: macOS (primary), Windows, Linux — avoid platform-specific dependencies unless
   unavoidable; flag them explicitly if introduced.
-- Cargo workspace with three crates:
-  - `core` — pipeline/algorithm logic only, no UI or CLI dependencies.
-  - `cli` — headless batch runner used for evaluation (see Evaluation workflow below).
-  - `app` — egui/eframe UI, depends on `core`.
+- Cargo workspace with three crates, under `crates/`:
+  - `stackaroni-core` — pipeline/algorithm logic only, no UI or CLI dependencies.
+  - `stackaroni-cli` — headless batch runner used for evaluation (see Evaluation workflow below).
+  - `stackaroni-app` — egui/eframe UI, depends on `stackaroni-core`.
+
+  Packages are prefixed because a package named literally `core` shadows Rust's built-in `core`
+  crate at every `use` site in the other crates.
 
 # Input assumptions
 
 - Input is 16-bit TIFF, already denoised and developed by the user outside the app (from RAW).
   Do not build RAW decoding or denoising into this app.
 - Decode 16-bit integer samples to `f32` immediately and do all pyramid/blend math in float,
-  converting to linear light on decode. Quantize back to 16-bit only on final output.
+  converting to linear light on decode. On output, re-encode to sRGB *before* quantizing back to
+  16-bit — writing linear light into the TIFF makes the file look far too dark in any normal
+  viewer, which would silently corrupt the visual rating loop rather than just look off.
 - Stacks can be large (24-60MP x 30-100+ frames, 16-bit). Do not assume a full stack fits in
   memory at once — design for streaming/tiled processing rather than loading everything up front.
 
@@ -89,7 +94,8 @@ judge this the same way, by outcomes I can actually assess, not by aesthetic gue
   (native file/folder dialogs). Only reach for `egui_dock` (dockable/movable panels) if a fixed
   layout turns out to be genuinely limiting in practice — start with a fixed layout, it's one
   less unknown.
-- Keep UI code in the `app` crate only; it depends on `core`, never the reverse. UI iteration
+- Keep UI code in the `stackaroni-app` crate only; it depends on `stackaroni-core`, never the
+  reverse. UI iteration
   should never risk touching pipeline logic.
 - After any layout change, take a screenshot of the running app and attach it back into the
   session so it can actually be seen and reviewed, the same way pipeline debug output gets
@@ -110,10 +116,12 @@ Rate every candidate output against this list (this is my rubric, not a proxy me
 
 # Evaluation workflow
 
-- A fixed set of 3-5 representative test stacks lives at `<fill in path once chosen>`. Do not
-  change this set when comparing algorithm versions — swap it out deliberately, not casually.
+- A fixed set of 3-5 representative test stacks lives at `test-data/` (gitignored; see
+  `test-data/README.md`). Do not change this set when comparing algorithm versions — swap it out
+  deliberately, not casually.
 - Run the pipeline against the test set headlessly:
-  `cargo run -p cli -- --test-set <path> --debug-out <path>`
+  `cargo run -p stackaroni-cli -- --test-set test-data --debug-out <path>`
+  or against one stack: `cargo run -p stackaroni-cli -- --input test-data/<stack> --output <file>`
 - After any change that could affect output quality, run the eval, look at the debug output and
   final images, and log the result in `docs/eval-log.md`: git commit hash, what changed, my
   score (1-5) against the checklist above, and notes. Don't skip logging — this is what lets us
@@ -132,7 +140,8 @@ Rate every candidate output against this list (this is my rubric, not a proxy me
 
 # Build & test
 
-- `cargo build`, `cargo test`, `cargo run -p app` (GUI), `cargo run -p cli -- ...` (headless eval).
+- `cargo build`, `cargo test`, `cargo run -p stackaroni-app` (GUI),
+  `cargo run -p stackaroni-cli -- ...` (headless eval).
 - Run `cargo fmt` and `cargo clippy` before considering a change finished.
 
 # Out of scope for now

@@ -1,0 +1,8 @@
+[package]
+name = "stackaroni-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+stackaroni-core = { path = "../core" }
