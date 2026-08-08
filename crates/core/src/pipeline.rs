@@ -21,9 +21,15 @@ pub type WeightMaps = Vec<ScratchPlane>;
 /// Geometric correction mapping a frame onto the reference frame.
 ///
 /// Translation only, which is what phase correlation (Kuglin & Hines, 1975)
-/// estimates. `docs/algorithms.md` §10 notes that focus breathing also changes
-/// apparent scale, so ECC or feature-based affine registration would need this
-/// widened to a 2x3 matrix — deliberately not done up front.
+/// estimates — and measurably **not** enough for the real stacks.
+///
+/// The `registration_accuracy` benchmark shows the frames differ by a uniform
+/// magnification of ~0.145% per frame: on `ruler`, opposite halves of the same
+/// adjacent pair report shifts of +3.3 px and −3.0 px, which no single `(dx, dy)`
+/// can represent. Widening this to a similarity transform (translation + uniform
+/// scale), estimated by log-polar phase correlation (Reddy & Chatterji, 1996), is
+/// the concrete next step — T5b. No rotation or shear shows in the per-region data,
+/// so a general affine model is not yet warranted.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Transform {
     /// Horizontal shift in pixels, reference to frame.
