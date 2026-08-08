@@ -5,4 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.6", features = ["derive"] }
 stackaroni-core = { path = "../core" }

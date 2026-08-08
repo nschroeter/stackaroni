@@ -2,5 +2,6 @@
 //!
 //! See `docs/algorithms.md` for the algorithms each stage implements and why.
 
+pub mod discovery;
 pub mod image;
 pub mod tiff_io;
