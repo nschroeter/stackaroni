@@ -40,6 +40,17 @@ const PLACEHOLDER_FRAMES: usize = 8;
 /// Height of a filmstrip entry. Thumbnails are fitted inside this, letterboxed.
 const THUMBNAIL_HEIGHT: f32 = 88.0;
 
+/// Side of the include/exclude checkbox drawn in a plate's corner.
+const BADGE: f32 = 16.0;
+
+/// Opacity of an excluded thumbnail.
+///
+/// The first attempt used 23%, which did not read as "excluded" — it read as a grey
+/// wash, indistinguishable from a rendering fault. Dimming is reinforcement here, not
+/// the signal: the unchecked badge carries the meaning, so this only has to be visibly
+/// different while leaving the frame recognizable enough to change your mind about.
+const EXCLUDED_OPACITY: u8 = 150;
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum GuideSpace {
     Linear,
@@ -125,6 +136,17 @@ impl eframe::App for App {
             if stack.is_loading() {
                 ui.ctx().request_repaint();
             }
+        }
+
+        // X toggles the selected frame, the keyboard half of the badge. Guarded on
+        // egui not wanting the key itself, so typing into a future text field cannot
+        // silently drop a frame from the run.
+        if !ui.ctx().egui_wants_keyboard_input()
+            && ui.input(|i| i.key_pressed(egui::Key::X))
+            && let Some(stack) = &mut self.stack
+            && let Some(frame) = stack.frames.get_mut(self.selected)
+        {
+            frame.included = !frame.included;
         }
 
         // Order matters: top and bottom claim full width, then the sides, then whatever
@@ -255,7 +277,12 @@ impl App {
         // `show_rows` rather than a plain loop: a 100+ frame stack means most entries are
         // scrolled out of view, and only the visible ones are worth laying out.
         let row_height = THUMBNAIL_HEIGHT + 4.0;
+        // Selecting and excluding are separate actions on separate affordances: clicking
+        // the plate selects, the corner badge (or X on the selected frame) includes or
+        // excludes. They were one click before, which meant you could not look at a frame
+        // without dropping it from the run.
         let mut clicked = None;
+        let mut toggled = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, row_height, stack.frames.len(), |ui, range| {
@@ -275,7 +302,7 @@ impl App {
                                 let image = if included {
                                     image
                                 } else {
-                                    image.tint(egui::Color32::from_white_alpha(60))
+                                    image.tint(egui::Color32::from_white_alpha(EXCLUDED_OPACITY))
                                 };
                                 image.paint_at(
                                     ui,
@@ -291,15 +318,41 @@ impl App {
                         }
                     });
 
+                    // Registered after the plate and overlapping it, so egui gives the
+                    // click to the badge rather than to the plate underneath.
+                    let badge_rect = egui::Rect::from_min_size(
+                        egui::pos2(
+                            response.rect.right() - BADGE - 5.0,
+                            response.rect.top() + 5.0,
+                        ),
+                        egui::Vec2::splat(BADGE),
+                    );
+                    let badge = ui.interact(
+                        badge_rect,
+                        ui.id().with(("include", index)),
+                        egui::Sense::click(),
+                    );
+                    draw_badge(ui, badge_rect, included, &badge);
+                    if badge.clicked() {
+                        toggled = Some(index);
+                    }
+
                     let name = frame
                         .path
                         .file_name()
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_default();
+                    badge.on_hover_text(if included {
+                        "included — click to exclude from the run"
+                    } else {
+                        "excluded — click to include in the run"
+                    });
+
+                    // A failed frame's reason belongs on the frame itself; the status bar
+                    // only counts them.
                     let hint = match &frame.thumbnail {
-                        Thumbnail::Failed(error) => error.clone(),
-                        _ if included => format!("{name}\nclick to exclude"),
-                        _ => format!("{name}\nexcluded — click to include"),
+                        Thumbnail::Failed(error) => format!("{name}\n{error}"),
+                        _ => format!("{name}\nX to exclude"),
                     };
                     if response.on_hover_text(hint).clicked() {
                         clicked = Some(index);
@@ -309,11 +362,21 @@ impl App {
             });
 
         // Applied after the loop because the closure borrows the stack immutably.
+        //
+        // The plates above were already drawn from the pre-click state, so this pass
+        // shows stale visuals and the change only appears on the next one. egui repaints
+        // reactively, and nothing else here asks for a repaint once thumbnails have
+        // finished loading — so without this the change appears not to happen until some
+        // unrelated input (a mouse move, or a second click) triggers a pass.
         if let Some(index) = clicked {
+            self.selected = index;
+            ui.ctx().request_repaint();
+        }
+        if let Some(index) = toggled {
             if let Some(stack) = &mut self.stack {
                 stack.frames[index].included = !stack.frames[index].included;
             }
-            self.selected = index;
+            ui.ctx().request_repaint();
         }
     }
 
@@ -403,7 +466,13 @@ fn plate(
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
     if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact_selectable(&response, selected);
+        // `interact`, not `interact_selectable`. The selectable variant expresses
+        // selection by swapping the *fill* to the selection colour, and that is wrong
+        // for a plate that holds an image: an excluded frame is drawn translucent, so
+        // the fill behind it shows through and a selected+excluded plate reads as a
+        // solid blue rectangle rather than as a dimmed thumbnail. Keeping the fill
+        // neutral means "dimmed" always means dimmed, whatever else is true of the frame.
+        let visuals = *ui.style().interact(&response);
         ui.painter().rect(
             rect,
             visuals.corner_radius,
@@ -412,8 +481,57 @@ fn plate(
             egui::StrokeKind::Inside,
         );
         contents(ui, rect.shrink(3.0));
+
+        // Selection is a border drawn over the contents, for two reasons: egui's own
+        // `interact_selectable` deliberately leaves `bg_stroke` alone (the line is
+        // commented out in its source), and a thumbnail covers all but a ~3 px margin of
+        // the plate, so any fill-based cue is invisible once real frames load. A border
+        // survives the image being painted over it, and stays readable on a dimmed one.
+        if selected {
+            let stroke = ui.visuals().selection.stroke;
+            ui.painter().rect_stroke(
+                rect,
+                visuals.corner_radius,
+                egui::Stroke::new(stroke.width.max(2.0), stroke.color),
+                egui::StrokeKind::Inside,
+            );
+        }
     }
     response
+}
+
+/// The include/exclude checkbox in a plate's corner.
+///
+/// Drawn from primitives rather than a glyph: the default font stack has no guaranteed
+/// checkmark, and a missing glyph would render as tofu on whichever platform lacks it —
+/// found by the user, not by us.
+fn draw_badge(ui: &egui::Ui, rect: egui::Rect, included: bool, response: &egui::Response) {
+    let visuals = ui.style().interact(response);
+    let painter = ui.painter();
+
+    painter.rect(
+        rect,
+        3.0,
+        if included {
+            ui.visuals().selection.bg_fill
+        } else {
+            // Opaque, not the plate's own fill: the badge sits on top of the thumbnail,
+            // so it needs its own background or the image shows through and the state
+            // becomes unreadable on a busy frame.
+            ui.visuals().extreme_bg_color
+        },
+        visuals.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    if included {
+        // A checkmark, two strokes, inset from the box.
+        let stroke = egui::Stroke::new(2.0, ui.visuals().strong_text_color());
+        let b = rect.shrink(4.0);
+        let elbow = egui::pos2(b.left() + b.width() * 0.36, b.bottom());
+        painter.line_segment([egui::pos2(b.left(), b.center().y), elbow], stroke);
+        painter.line_segment([elbow, egui::pos2(b.right(), b.top())], stroke);
+    }
 }
 
 fn label_in(ui: &egui::Ui, rect: egui::Rect, text: &str, color: egui::Color32) {
