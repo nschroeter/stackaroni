@@ -16,13 +16,25 @@
 //!
 //! # Known gaps, deliberately outstanding
 //!
-//! **No free-space check before starting.** The CLI already solves this with `fs4`:
-//! scratch holds one focus map and one weight plane per frame, both f32 and full
-//! resolution, so a 100-frame 50 MP stack needs ~38 GB, and it checks before starting
-//! rather than failing an hour in. The app does not, which is a regression against a
-//! sibling that got it right — a run that was never going to fit currently dies
-//! partway instead of in the first second. Same dependency, same arithmetic, wired
-//! into [`Run::start`] before the thread is spawned.
+//! **Nothing accounts for disk space, before or after a run. Build both halves
+//! together — a check alone only half-solves it.**
+//!
+//! *Before:* no free-space check. The CLI already solves this with `fs4`: scratch holds
+//! one focus map and one weight plane per frame, both f32 and full resolution, so a
+//! 100-frame 50 MP stack needs ~38 GB, and it checks before starting rather than
+//! failing an hour in. The app does not, which is a regression against a sibling that
+//! got it right — a run that was never going to fit currently dies partway instead of
+//! in the first second. Same dependency, same arithmetic, wired into [`Run::start`]
+//! before the thread is spawned.
+//!
+//! *After:* nothing reaps kept scratch. Keeping a *failed* run's scratch is deliberate
+//! and correct — it is the case worth inspecting — but nothing ever removes it, so it
+//! accumulates silently. Found in practice on 2026-08-10: 38 GB of stale
+//! `stackaroni-<stack>-<pid>` directories from long-dead runs, plus an orphaned result
+//! from a successful one. A free-space check that still lets forgotten debris eat the
+//! headroom it is protecting is only half a fix, so reaping belongs in the same pass:
+//! at startup, drop `stackaroni-*` entries in the temp directory whose pid is no longer
+//! alive.
 //!
 //! **No export.** A finished run leaves its result at a temp path
 //! (`stackaroni-run-<pid>-<n>.tif`) which nothing cleans up and no UI writes anywhere
