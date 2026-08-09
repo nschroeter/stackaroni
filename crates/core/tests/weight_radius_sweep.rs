@@ -226,3 +226,62 @@ fn detail_ceiling_of_the_source_frames() {
         truth_bokeh
     );
 }
+
+/// Render the two candidate configurations for a visual call on checklist item 3.
+///
+/// The numbers cannot settle r4 versus r8: the difference is whether 30% excess
+/// bokeh energy reads as patchy over-sharpening to a human. Both are written at full
+/// resolution for side-by-side inspection.
+#[test]
+#[ignore = "requires test-data/, run with --release"]
+fn render_candidate_configs() {
+    let Ok(stack) = discover_stack(&stack_dir()) else {
+        return;
+    };
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug-out/candidates");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let transforms = vec![Transform::IDENTITY; stack.frames.len()];
+    let by_path: HashMap<PathBuf, Transform> = stack
+        .frames
+        .iter()
+        .cloned()
+        .zip(transforms.iter().copied())
+        .collect();
+
+    let focus_dir = out.join("focus");
+    std::fs::create_dir_all(&focus_dir).unwrap();
+    let metric = WindowedLaplacian::new(FOCUS_RADIUS, &focus_dir, by_path.clone());
+    let focus_maps: Vec<FocusMap> = stack
+        .frames
+        .iter()
+        .map(|p| metric.evaluate(&Image::open(p).unwrap()).unwrap())
+        .collect();
+    let images: Vec<Image> = stack
+        .frames
+        .iter()
+        .map(|p| Image::open(p).unwrap())
+        .collect();
+
+    for (radius, epsilon) in [(4u32, 1e-4f32), (8, 1e-4)] {
+        let scratch = out.join(format!("s{radius}"));
+        std::fs::create_dir_all(&scratch).unwrap();
+        let estimator = GuidedWeights::new(
+            stack.frames.clone(),
+            transforms.clone(),
+            radius,
+            epsilon,
+            GuideSpace::Perceptual,
+            &scratch,
+        );
+        let weights = estimator.weights(&focus_maps).unwrap();
+        let path = out.join(format!("r{radius}.tif"));
+        LaplacianPyramidFusion::new(&path, by_path.clone(), PYRAMID_FLOOR)
+            .fuse(&images, &weights)
+            .unwrap();
+        drop(weights);
+        let _ = std::fs::remove_dir_all(&scratch);
+        println!("wrote {}", path.display());
+    }
+    let _ = std::fs::remove_dir_all(&focus_dir);
+}
