@@ -36,6 +36,12 @@ const THUMBNAIL_WIDTH: usize = 128;
 /// judging it; the preview pane is where fidelity will matter.
 const MAX_ROWS_PER_BAND: u32 = 4;
 
+/// Same cap for the preview, which is decoded at a much smaller downsample factor and so
+/// already averages most of the band. At a preview width of ~1600 from an 8664 px frame
+/// the factor is 5, so this reads 4 rows of every 5 — near-complete box filtering, and
+/// the reason a preview looks materially better than a thumbnail scaled up.
+const PREVIEW_MAX_ROWS: u32 = 4;
+
 /// A frame's thumbnail, or the reason there isn't one.
 pub enum Thumbnail {
     Pending,
@@ -183,16 +189,25 @@ fn decode_all(paths: &[PathBuf], id: u64, generation: &AtomicU64, sender: &Sende
 
 /// Decode one frame down to a thumbnail.
 fn thumbnail(path: &Path) -> Result<egui::ColorImage> {
+    decode_scaled(path, THUMBNAIL_WIDTH, MAX_ROWS_PER_BAND)
+}
+
+/// Decode one frame down to roughly `target_width`, averaging at most `max_rows` source
+/// rows per output row.
+///
+/// Shared by the filmstrip and the preview, which differ only in how much they read: a
+/// thumbnail wants speed over fidelity, a preview the reverse.
+fn decode_scaled(path: &Path, target_width: usize, max_rows: u32) -> Result<egui::ColorImage> {
     let image = Image::open(path)?;
     let info = image.info();
 
-    let factor = (info.width as usize / THUMBNAIL_WIDTH).max(1) as u32;
+    let factor = (info.width as usize / target_width.max(1)).max(1) as u32;
     let (width, height) = (
         (info.width / factor).max(1) as usize,
         (info.height / factor).max(1) as usize,
     );
 
-    let rows_per_band = factor.min(MAX_ROWS_PER_BAND);
+    let rows_per_band = factor.min(max_rows.max(1));
     let mut band = vec![0f32; info.row_len() * rows_per_band as usize];
     let mut pixels = Vec::with_capacity(width * height);
 
@@ -222,6 +237,131 @@ fn thumbnail(path: &Path) -> Result<egui::ColorImage> {
     }
 
     Ok(egui::ColorImage::new([width, height], pixels))
+}
+
+/// The selected frame, decoded large enough to fill the preview pane.
+///
+/// Separate from the filmstrip's worker and deliberately single-slot: only the current
+/// selection matters, so a request supersedes whatever was in flight. Arrowing down the
+/// filmstrip would otherwise queue one full-resolution decode per frame passed over.
+#[derive(Default)]
+pub struct Preview {
+    /// Which frame the current texture belongs to, once it has arrived.
+    pub index: Option<usize>,
+    pub texture: Option<egui::TextureHandle>,
+    pub error: Option<String>,
+    /// The frame a decode is running for, if any. At most one at a time.
+    pending: Option<usize>,
+    /// The frame wanted next, superseding any earlier want. Intermediate frames are
+    /// never decoded at all.
+    wanted: Option<(usize, PathBuf, usize)>,
+    channel: Option<Receiver<PreviewMessage>>,
+    requests: u64,
+}
+
+struct PreviewMessage {
+    request: u64,
+    index: usize,
+    result: std::result::Result<egui::ColorImage, String>,
+}
+
+impl Preview {
+    /// Ask for `index`, unless it is already shown or already being decoded.
+    ///
+    /// Called every pass with the current selection, so it must be cheap and idempotent.
+    pub fn request(&mut self, path: &Path, index: usize, target_width: usize) {
+        // Keyed on the frame having been *attempted*, not on it having succeeded. Keying
+        // on success would re-request a frame that failed to decode on every single pass,
+        // spawning a thread per frame to fail again — a spin loop behind a static error
+        // message. Selection moving elsewhere is what triggers the next decode.
+        if self.index == Some(index) || self.pending == Some(index) {
+            self.wanted = None;
+            return;
+        }
+        // Overwrites any earlier want rather than queueing: clicking through five frames
+        // should decode the fifth, not all five.
+        self.wanted = Some((index, path.to_path_buf(), target_width));
+        self.start_if_idle();
+    }
+
+    /// Begin the wanted decode, if nothing is already running.
+    ///
+    /// **One decode at a time, and this is the point of the type.** Spawning per request
+    /// meant that clicking through the filmstrip started an unbounded number of
+    /// concurrent decodes: nothing cancelled the old ones, each held a full preview image
+    /// (~11 MB at 2000 px wide) plus its read buffer, and each was competing for the same
+    /// disk. Ten quick clicks was ten threads and ~110 MB in flight, to display one frame.
+    fn start_if_idle(&mut self) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some((index, path, target_width)) = self.wanted.take() else {
+            return;
+        };
+        self.requests += 1;
+        let request = self.requests;
+        let (sender, receiver) = channel();
+
+        std::thread::spawn(move || {
+            let result =
+                decode_scaled(&path, target_width, PREVIEW_MAX_ROWS).map_err(|e| e.to_string());
+            let _ = sender.send(PreviewMessage {
+                request,
+                index,
+                result,
+            });
+        });
+
+        self.pending = Some(index);
+        self.channel = Some(receiver);
+    }
+
+    /// Upload a finished decode, if one has arrived.
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        let Some(receiver) = &self.channel else {
+            return;
+        };
+        let Ok(message) = receiver.try_recv() else {
+            return;
+        };
+        self.channel = None;
+        self.pending = None;
+
+        // Result first, *then* start the next decode. `start_if_idle` bumps `requests`,
+        // so starting first would make the staleness check below compare against the new
+        // request's number and discard the result that just arrived — every time.
+        //
+        // A superseded request whose thread finished late: its frame is no longer the
+        // selected one, so showing it would put the wrong image under the right label.
+        if message.request == self.requests {
+            match message.result {
+                Ok(image) => {
+                    // Assigning here drops the previous handle, and `TextureHandle::drop`
+                    // frees the texture — so the pane holds one frame's worth of GPU
+                    // memory regardless of how many frames have been looked at.
+                    self.texture = Some(ctx.load_texture(
+                        format!("preview-{}", message.request),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                    self.index = Some(message.index);
+                    self.error = None;
+                }
+                Err(error) => {
+                    self.texture = None;
+                    self.index = Some(message.index);
+                    self.error = Some(error);
+                }
+            }
+        }
+
+        // Whatever was wanted while this one ran starts now.
+        self.start_if_idle();
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.pending.is_some() || self.wanted.is_some()
+    }
 }
 
 /// Linear light to an 8-bit sRGB sample.
@@ -390,6 +530,32 @@ mod tests {
             "background: ~{:?} for the whole filmstrip",
             thumbnail_time * probed.frames.len() as u32
         );
+
+        // The preview fires on every selection change, unlike the filmstrip's one pass
+        // per folder, so its per-frame cost and footprint are what bound rapid clicking.
+        let started = Instant::now();
+        let preview = decode_scaled(path, 2000, PREVIEW_MAX_ROWS).unwrap();
+        println!(
+            "\npreview {:?} -> {:?}, {:.1} MB in flight per decode",
+            started.elapsed(),
+            preview.size,
+            (preview.pixels.len() * 4) as f64 / 1e6,
+        );
+        println!("one at a time: requests coalesce, so that figure is the ceiling");
+    }
+
+    #[test]
+    fn decode_scaled_honours_the_requested_width() {
+        // The preview and the filmstrip share this path and differ only in target size,
+        // so a target that was ignored would silently give the preview pane a 128 px
+        // image stretched across it — blurry in a way easily mistaken for the stack
+        // itself being soft.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.tif");
+        write_flat(&path, 1024, 512, [0.5; 3]);
+
+        assert_eq!(decode_scaled(&path, 128, 4).unwrap().size, [128, 64]);
+        assert_eq!(decode_scaled(&path, 512, 4).unwrap().size, [512, 256]);
     }
 
     #[test]

@@ -8,12 +8,11 @@
 //! Fixed panels, not `egui_dock`. A dockable layout is one more unknown and buys nothing
 //! until a fixed one is shown to be limiting in practice.
 //!
-//! Folder loading and the filmstrip are real; everything else is still placeholder. The
-//! preview pane and the parameter widgets are not wired to anything — the parameters
-//! exist so the panel has real controls at real sizes, and nothing reads them yet.
-//!
-//! The enums below stay local placeholders rather than being bound to the core types
-//! they mirror, because nothing consumes them yet. They get bound when a run does.
+//! Folder loading, the filmstrip and the preview are real. The parameter widgets are
+//! not: they edit local state that nothing reads, and exist so the panel has real
+//! controls at real sizes. The enums they use stay local placeholders rather than being
+//! bound to the core types they mirror, because nothing consumes them yet — they get
+//! bound when a run does.
 
 mod stack;
 
@@ -21,7 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use eframe::egui;
-use stack::{Stack, Thumbnail};
+use stack::{Preview, Stack, Thumbnail};
 
 fn main() -> eframe::Result {
     eframe::run_native(
@@ -95,6 +94,7 @@ struct App {
     selected: usize,
     params: Params,
     stack: Option<Stack>,
+    preview: Preview,
     /// Shared with worker threads so a superseded load can be abandoned mid-decode.
     generation: Arc<AtomicU64>,
     error: Option<String>,
@@ -112,6 +112,7 @@ impl App {
         // Dropping the previous stack retires its worker, so opening a second folder
         // mid-decode does not leave the first one reading gigabytes.
         self.stack = None;
+        self.preview = Preview::default();
         self.selected = 0;
 
         match Stack::load(&dir, Arc::clone(&self.generation)) {
@@ -136,6 +137,10 @@ impl eframe::App for App {
             if stack.is_loading() {
                 ui.ctx().request_repaint();
             }
+        }
+        self.preview.poll(ui.ctx());
+        if self.preview.is_loading() {
+            ui.ctx().request_repaint();
         }
 
         // X toggles the selected frame, the keyboard half of the badge. Guarded on
@@ -381,31 +386,78 @@ impl App {
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
+        let heading = match &self.stack {
+            Some(stack) => stack
+                .frames
+                .get(self.selected)
+                .and_then(|f| f.path.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            None => String::new(),
+        };
         ui.vertical_centered(|ui| {
             ui.add_space(6.0);
-            ui.label(egui::RichText::new(format!("Frame {:03}", self.selected)).strong());
+            ui.label(egui::RichText::new(heading).strong());
         });
         ui.add_space(6.0);
 
         // Fills whatever the panels leave, which is the point of the centre pane: it is
         // where a 50 MP frame has to be legible.
         let rect = ui.available_rect_before_wrap();
-        let painter = ui.painter();
-        let visuals = ui.visuals();
-        painter.rect(
+        let visuals = ui.visuals().clone();
+        ui.painter().rect(
             rect,
             visuals.window_corner_radius,
             visuals.extreme_bg_color,
             visuals.window_stroke,
             egui::StrokeKind::Inside,
         );
-        painter.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "preview",
-            egui::FontId::proportional(16.0),
-            visuals.weak_text_color(),
-        );
+
+        let Some(stack) = &self.stack else {
+            label_in(
+                ui,
+                rect,
+                "open a folder to begin",
+                visuals.weak_text_color(),
+            );
+            return;
+        };
+        let Some(frame) = stack.frames.get(self.selected) else {
+            return;
+        };
+
+        // Sized from the pane rather than a constant, so a large window gets a sharper
+        // preview and a small one does not decode pixels it will immediately throw away.
+        // Doubled for a little headroom against resizing and HiDPI.
+        let target = (rect.width() * 2.0).clamp(512.0, 3000.0) as usize;
+        self.preview.request(&frame.path, self.selected, target);
+
+        match (&self.preview.texture, &self.preview.error) {
+            (_, Some(error)) => label_in(ui, rect, error, visuals.error_fg_color),
+            (Some(texture), None) => {
+                let size = fit(texture.size_vec2(), rect.shrink(8.0).size());
+                let image = egui::Image::new(texture);
+                // Dimmed to match the filmstrip, so the preview cannot contradict what
+                // the badge says about whether this frame is in the run.
+                let image = if frame.included {
+                    image
+                } else {
+                    image.tint(egui::Color32::from_white_alpha(EXCLUDED_OPACITY))
+                };
+                image.paint_at(ui, egui::Rect::from_center_size(rect.center(), size));
+
+                if self.preview.is_loading() {
+                    // The old frame stays up while the new one decodes — blanking the
+                    // pane on every selection change would flicker harder than it helps.
+                    // Which makes the indicator the only thing distinguishing "this is
+                    // the frame you picked" from "this is still the previous one", so it
+                    // gets its own backing and the centre of the pane rather than sitting
+                    // as faint text over an arbitrary image.
+                    loading_overlay(ui, rect, &visuals);
+                }
+            }
+            (None, None) => loading_overlay(ui, rect, &visuals),
+        }
     }
 
     fn parameters(&mut self, ui: &mut egui::Ui) {
@@ -532,6 +584,40 @@ fn draw_badge(ui: &egui::Ui, rect: egui::Rect, included: bool, response: &egui::
         painter.line_segment([egui::pos2(b.left(), b.center().y), elbow], stroke);
         painter.line_segment([elbow, egui::pos2(b.right(), b.top())], stroke);
     }
+}
+
+/// A spinner and "Loading…" on an opaque pill, centred in `area`.
+///
+/// Backed rather than plain text because it is drawn over a photograph: any fixed text
+/// colour is illegible against some frame, and this one has to be readable against all
+/// of them.
+fn loading_overlay(ui: &mut egui::Ui, area: egui::Rect, visuals: &egui::Visuals) {
+    let pill = egui::Rect::from_center_size(area.center(), egui::vec2(148.0, 40.0));
+    ui.painter().rect(
+        pill,
+        8.0,
+        visuals.extreme_bg_color.gamma_multiply(0.92),
+        visuals.window_stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    let spinner = egui::Rect::from_center_size(
+        egui::pos2(pill.left() + 26.0, pill.center().y),
+        egui::Vec2::splat(18.0),
+    );
+    ui.put(
+        spinner,
+        egui::Spinner::new()
+            .size(18.0)
+            .color(visuals.strong_text_color()),
+    );
+    ui.painter().text(
+        egui::pos2(pill.left() + 46.0, pill.center().y),
+        egui::Align2::LEFT_CENTER,
+        "Loading…",
+        egui::FontId::proportional(15.0),
+        visuals.strong_text_color(),
+    );
 }
 
 fn label_in(ui: &egui::Ui, rect: egui::Rect, text: &str, color: egui::Color32) {
