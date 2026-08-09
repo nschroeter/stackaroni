@@ -27,8 +27,12 @@ use stackaroni_core::weights::{GuideSpace, GuidedWeights};
 
 const REGISTRATION_LEVEL: u32 = 3;
 const FOCUS_RADIUS: u32 = 4;
-const GUIDE_RADIUS: u32 = 8;
-const GUIDE_EPSILON: f32 = 1e-2;
+// Retuned from radius 8 / eps 1e-2 after the `51d6833` run: that config averaged
+// ~25 frames per pixel (noise fell 5x, and noise falls as sqrt(N)), which is what
+// destroyed thin-structure contrast. Radius 4 / eps 1e-4 reaches 91% of the
+// per-pixel oracle on synthetic_50 with no mottling visible at the rim or in bokeh.
+const GUIDE_RADIUS: u32 = 4;
+const GUIDE_EPSILON: f32 = 1e-4;
 const PYRAMID_FLOOR: u32 = 32;
 
 #[test]
