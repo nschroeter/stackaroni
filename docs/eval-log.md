@@ -27,7 +27,7 @@ problems that the blossom stack won't).
 
 ## Current state
 
-*Updated with `1f06c65`. Update this block in the same commit as any row that changes it.*
+*Updated with `c1ee8df`+. Update this block in the same commit as any row that changes it.*
 
 **Live configuration** — guided filter radius 4, epsilon 1e-4, guide space perceptual;
 focus radius 4; registration phase-correlation similarity at level 3, chained outward
@@ -36,14 +36,27 @@ from the middle frame; pyramid floor 32 px.
 **Current outputs** — `test-data/<stack>/stackaroni_fused.tif`, byte-identical copies at
 `target/debug-out/t10/<stack>.tif`, per-stage debug at `target/debug-out/t10/debug/<stack>/`.
 
-**Awaiting a rating** — the `e2e6b8a` retune row, covering blossom, ruler and
-synthetic_50. That is the only row waiting on a human score; every other row is either
-closed or not scoreable.
+**Rated** — the `e2e6b8a` retune is scored: **synthetic_50 5, ruler 3, blossom 1**.
+Nothing is currently awaiting a human score.
+
+**Top priority** — investigate a **per-pyramid-level maximum-selection fusion rule**
+(PMax-shaped) to replace T8's single-weight-map-per-level blend. Zerene's PMax on the same
+frames looks good where its DMap-family output looks like ours, and the difference is
+architectural. Second priority, only if that does not pan out: a blossom-specific
+radius/eps sweep.
+
+**Separate thread** — ruler's lifted black point. Ticks read grey with crisp edges, which
+points at the output transfer function or a local-contrast loss, not at sharpness. Must not
+be absorbed into the blossom investigation.
 
 **Scores in the log that are NOT live** — `51d6833` (1-2) and `6e638d7` (3 provisional)
 both score the superseded radius-8/eps-1e-2 configuration, and both are my own reads, not
 Niels's. The `e2e6b8a` halo row reads "needs Niels's rating" but was retracted and closed
 below it; nothing there to rate.
+
+**Recorded plainly** — the retune's measured gains were real (signal 0.32 -> 0.45,
+effective frames 25 -> 7.6) and blossom is still rated 1. Metric improvement did not move
+usability. Do not let a future metric gain stand in for a rating.
 
 **Open, not blocking** — T5b item 1, chained registration drift (measured secondary,
 ~11% of degradation); ~7.6 effective frames averaged per pixel on blossom against an
@@ -56,6 +69,8 @@ and a look at the image before it goes in the log.
 
 | Date | Commit | Stack | Change | Score (1-5) | Notes |
 |---|---|---|---|---|---|
+| 2026-08-09 | `e2e6b8a` | synthetic_50 / ruler / blossom | **RATED by Niels at 1:1 — the r4/eps-1e-4 retune.** Supersedes my provisional reads. | **synthetic_50: 5 · ruler: 3 · blossom: 1** | **synthetic_50 = 5**, clean, matches what was already logged. **ruler = 3**, barely acceptable, held back specifically by *low contrast*: ticks read grey rather than black — a lifted black point, not a sharpness problem, since the edges themselves are crisp. Being pursued as a **separate thread** (see the transfer-function row). **blossom = 1**, completely mushy, no usable detail. **Log the gap plainly: the retune's measured gains were real and substantial — signal ratio 0.32 -> 0.45, effective frames 25 -> 7.6 — and the image is still unusable.** A large, correctly-measured improvement moved the score from unusable to unusable. That is the sharpest evidence yet that the metrics track something real but not sufficient, and it argues the remaining problem is architectural rather than a matter of tuning the current architecture further. |
+| 2026-08-09 | `c1ee8df` | blossom | **Third-party reference: Zerene Stacker PMax looks good on the same source frames; its DMap-family output looks like ours.** Reported by Niels. | n/a — architectural finding | Zerene's **"Fused" (DMap-family)** output on blossom's actual frames resembles our mushy result; its **"PMax"** output looks very good. These differ *architecturally*, not by tuning. **PMax** builds a resolution pyramid and independently selects the highest-local-contrast source frame **at each pyramid level** — a fresh contrast decision per frequency band. **DMap** makes one depth-map-style frame-selection decision and blends from that single decision; it is documented as weaker on fine detail and prone to exactly this softness, while PMax is documented as strong on "overlapping structures like mats of hair and crisscrossing bristles" — blossom's actual subject. **Stackaroni's T6→T7→T8 matches DMap's shape, not PMax's:** one focus map per frame at a single window scale (T6), smoothed into weight maps (T7), and that same weight map Gaussian-smoothed per level and propagated through the pyramid (T8). One global decision, required to be simultaneously smooth enough to avoid background mottling and sharp enough to keep detail — because it is the only decision there is. PMax has no such tension: each level gets its own independently-scaled decision. **This reframes the radius sweep as tuning a constraint that need not exist**, and demotes it to second priority behind investigating a per-level selection fusion rule. |
 | 2026-08-08 | `e30dba2` | ruler | T5: phase-correlation registration (Kuglin & Hines 1975), sub-pixel parabolic peak. | n/a — no fused output yet | **Translation is the wrong model for this data.** Per-region correlation on one adjacent pair: left half +3.32 px, right half −2.98 px; top +0.99, bottom −1.24. At sep=20: +75.5 / −57.8 and +29.6 / −47.7. Opposite-signed and near-symmetric about the centre ⇒ uniform magnification, not displacement. Implied scale change ~0.145%/frame, consistent between sep=1 (6.3 px over 4332 px) and sep=20 (133 px over 4332 px) ⇒ ~14% across 100 frames. Alignment overlay shows red/green doubling growing radially toward the corners. A single `(dx,dy)` averages a field spanning ±3 px, so every adjacent pair keeps ~±3 px residual, ±60 px at the stack ends — ghosting on high-contrast edges (checklist item 2). Predicted by `docs/algorithms.md` §10. Not wired in as the active `Registration` impl. Fix = T5b, log-polar phase correlation (Reddy & Chatterji, *IEEE TIP* 5(8), 1996, 1266–1271) for translation + uniform scale. No rotation or shear in the per-region data, so general affine/ECC is not yet warranted. |
 | 2026-08-08 | `4d025b3` | ruler | T5b: similarity registration — log-polar phase correlation for uniform scale (Reddy & Chatterji, *IEEE TIP* 5(8), 1996, 1266–1271). | n/a — no fused output yet | **Fixes the T5 finding.** Per-region spread, full-res px, level 3: sep=1 5.01→1.14, sep=5 27.1→0.96, sep=20 133→35.7. Level 2 sep=1 6.30→0.92. Control (warp one real frame by a *known* similarity, estimate, correct) gives 0.98 px at scale 0.999 and 0.10 px at scale 0.958 — so **~1 px is the estimator's noise floor for small scale changes, not residual misalignment**, and adjacent pairs are now corrected as far as this method can measure. Alignment overlay at sep=20 shows the doubled tick marks collapse to single, radial corner fringing gone. Rotation measured <0.13° on every real pair ⇒ reported via `SimilarityEstimate`, not modelled; ECC affine stays unwarranted. **Two open items for T9 integration:** (1) estimator is ~30× more precise on large scale changes (0.958 → err 3e-5) than small (0.999 → err 2.2e-4), so chaining ~50 small steps out from the anchor may accumulate scale drift — measure direct-to-anchor against chained before wiring in; (2) real pairs at sep=20 keep 36 px spread that the control proves is *not* estimator error, so something beyond a uniform similarity happens over large separations — irrelevant if chaining sep=1 wins, decisive if direct-to-anchor does. |
 | 2026-08-09 | `ced3a45` | blossom | **First look at a real stack's argmax label field** (`target/debug-out/t10/debug/blossom/labels_argmax.png`). | n/a — observation | Three things. (1) **The subject's depth structure is coherent** — buds, stems and individual florets resolve as distinct label regions, so the focus measure is producing a sensible depth ordering on real data, not just synthetic. (2) **The entire plain background is salt-and-pepper**, argmax picking essentially at random where there is no detail to measure. Photometrically harmless here because all frames are near-identical in flat background, which is why the fused output shows no mottling despite the label field looking alarming — the same pattern seen on synthetic_50 at `6a1206c`. (3) **New: a bright ring of high-index labels hugs the subject/background boundary.** Likely mechanism is the *focus measure*, not fusion: a radius-4 window centred on background near the subject straddles the subject's edge and inherits its Laplacian energy, so those background pixels get labelled with whichever frame makes that edge sharpest. That is a plausible contributor to the small residual edge overshoot closed out in the row below, and it locates the cause in the focus stage rather than the blend. **Not being chased now** (the overshoot is small and localized, per agreement), but it is the first thing to look at if a rated output ever shows halo at a high-contrast boundary: the fix would be a focus measure that discounts windows straddling a large depth discontinuity, not a change to fusion. |
