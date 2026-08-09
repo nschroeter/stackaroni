@@ -97,6 +97,61 @@ Laplacian-pyramid fusion is one of the strongest candidates for this application
   reconstruction
 ```
 
+## 6b. Selection versus averaging in the pyramid (added after the blossom rating)
+
+§6 cites Burt & Kolczynski (1993) for "selective image fusion". The *selective* part is a
+distinct fusion rule from the weighted average, and stackaroni initially implemented only
+the average. This section records the difference, because it is the leading candidate for
+fixing the blossom result (rated 1/5 at `e2e6b8a`).
+
+**What is currently implemented (T8).** One weight map per frame, produced by T6 focus
+measurement and T7 guided-filter refinement, is Gaussian-reduced to each pyramid level and
+used to blend:
+
+```
+fused[level] = sum_k  W_k[level] * L_k[level]
+```
+
+Every level therefore inherits the *same* decision, taken once at a single window scale.
+That decision must simultaneously be smooth enough to avoid background mottling and sharp
+enough to preserve thin structure. This is architecturally the shape of Zerene Stacker's
+DMap, and it carries DMap's documented weakness at fine detail.
+
+**Burt & Kolczynski's rule.** The decision is taken independently at every level and
+position, from the pyramid coefficients themselves:
+
+```
+S_k(l,p)  = salience, local energy of L_k over a window W around p
+M(l,p)    = match, normalized correlation between the sources over W
+if M < threshold:   select the coefficient with greatest salience
+else:               average, weighted toward the more salient
+```
+
+A fresh contrast decision per frequency band, which is architecturally the shape of Zerene's
+PMax — documented as strong on "overlapping structures like mats of hair and crisscrossing
+bristles", i.e. exactly the subject stackaroni scores worst on.
+
+**Why the salience window matters, rather than naive per-pixel maximum.** The simpler rule
+— take the coefficient of largest absolute value at each level and position — is standard in
+the multi-focus literature, but is noise-sensitive: reconstructed pixels are drawn from
+different sources inconsistently across levels, "resulting in loss of original clear
+information and introduction of distortion" (Wang et al., *PLOS ONE* 13(5), 2018, region
+mosaicking on Laplacian pyramids). On ISO-1600 frames, per-pixel argmax over Laplacian
+coefficients would routinely select noise. Use the windowed salience form; `filter::box_sum`
+already provides the window.
+
+**Scope.** This is a change to the fusion rule inside `fusion.rs`, not a new stage or
+dependency, and it is plausibly *less* code than the current path. Note the consequence: for
+the band-pass levels the decision comes from the pyramid itself, so T6/T7 are no longer on
+the critical path for detail — they remain relevant for the base (coarsest) band, which has
+no meaningful "contrast" to select on and still needs a weighted blend.
+
+**References for this section**
+
+- Burt, P. J., & Kolczynski, R. J. (1993). Enhanced image capture through fusion. *ICCV*, 173-182.
+- Wang, J., et al. (2018). A multi-focus image fusion method via region mosaicking on
+  Laplacian pyramids. *PLOS ONE*, 13(5), e0191085.
+
 ## 7. The focus map is the critical component
 
 The quality of the focus map is often more important than the final blending operation. A raw winner-takes-all rule can make neighboring pixels choose unrelated source frames. The desired result is spatially coherent regions corresponding to meaningful focused structures.
