@@ -75,9 +75,10 @@ struct Cli {
 
     /// How the pyramid levels are combined. See `docs/algorithms.md` §6b.
     ///
-    /// Defaults to `blend`, the T8 rule, so every eval-log row recorded before
-    /// `--fusion` existed still reproduces from its commit without extra flags.
-    #[arg(long, value_enum, default_value_t = FusionArg::Blend)]
+    /// `select` is the default as of T11, on ratings across all three stacks:
+    /// blossom 1 -> 5, ruler 3 -> 5, synthetic_50 5 -> 4. Reproducing an eval-log row
+    /// from before the flip needs an explicit `--fusion blend`.
+    #[arg(long, value_enum, default_value_t = FusionArg::Select)]
     fusion: FusionArg,
 
     /// Salience window radius for `--fusion select`. Ignored by `blend`.

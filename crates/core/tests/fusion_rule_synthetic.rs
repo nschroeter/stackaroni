@@ -96,9 +96,19 @@ fn selection_versus_blend_against_ground_truth() {
     println!("detail <1 means detail lost; bokeh >1 means mottling (checklist item 3)\n");
     println!("{:>10}  {:>8}  {:>8}", "rule", "detail", "bokeh");
 
+    // The radius sweep tests one mechanism for the antenna softness Niels scored down:
+    // the salience window is square and `r2` spans 5 px, wider than a 1-3 px antenna, so
+    // at the finest level a neighbouring frame's broader defocused energy can win the
+    // window even where the line is sharper at the exact pixel. If that is the cause,
+    // detail should rise as the radius shrinks. `r0` is per-pixel argmax — the rule §6b
+    // rejects as noise-sensitive — included as the endpoint that shows what the window
+    // is buying.
     for (label, rel) in [
         ("blend", "target/debug-out/t10/synthetic_50.tif"),
-        ("select", "target/debug-out/t11/synthetic_50_select.tif"),
+        ("select r0", "target/debug-out/t11/synthetic_50_sel_r0.tif"),
+        ("select r1", "target/debug-out/t11/synthetic_50_sel_r1.tif"),
+        ("select r2", "target/debug-out/t11/synthetic_50_select.tif"),
+        ("select r3", "target/debug-out/t11/synthetic_50_sel_r3.tif"),
     ] {
         let Ok(image) = Image::open(&root().join(rel)) else {
             println!("{label:>10}  (missing {rel})");
@@ -128,6 +138,120 @@ fn selection_versus_blend_against_ground_truth() {
         masked_mean(&per_pixel_max, &structure) / truth_detail
     );
     println!("read detail as a fraction of the oracle, not of 1.00\n");
+}
+
+/// Is the antenna softness the fusion rule's, or the resampling the warp does?
+///
+/// The salience-radius sweep refuted the window-too-wide explanation: detail is flat
+/// across r0..r3 and if anything *rises* with a wider window. That leaves a candidate the
+/// fusion rule cannot be blamed for. Every selected coefficient is read out of a
+/// **bilinearly resampled** frame, because fusion warps each frame into anchor
+/// coordinates before building its pyramid — and bilinear interpolation is a low-pass
+/// filter, which costs most exactly on 1-3 px structures like an antenna.
+///
+/// This runs the identical fusion with `Transform::IDENTITY`, so nothing is resampled.
+/// The gap between the two is the resampling cost, isolated.
+///
+/// **The answer generalizes in the direction that matters.** If resampling is the cause,
+/// real stacks are affected *more*, not less: synthetic_50's scale spans ~0.7% while
+/// blossom and ruler span ~11%, so their frames are stretched far harder and interpolated
+/// at correspondingly more non-integer positions.
+#[test]
+#[ignore = "requires test-data/, run with --release"]
+fn how_much_detail_does_the_warp_itself_cost() {
+    use stackaroni_core::focus::WindowedLaplacian;
+    use stackaroni_core::fusion::SelectionFusion;
+    use stackaroni_core::pipeline::{
+        FocusMap, FocusMetric, ImageFusion, Registration, Transform, WeightEstimator,
+    };
+    use stackaroni_core::weights::{GuideSpace, GuidedWeights};
+    use std::collections::HashMap;
+
+    let Ok(stack) = discover_stack(&stack_dir()) else {
+        eprintln!("skipping: test-data/synthetic_50 not present");
+        return;
+    };
+    let truth = Grid::from_image(
+        &Image::open(&stack_dir().join("ground_truth_all_in_focus.tiff")).unwrap(),
+        0,
+    )
+    .unwrap();
+    let (structure, smooth) = masks(&truth, 0.02, 0.50);
+    let truth_energy = laplacian_energy(&truth);
+    let truth_detail = masked_mean(&truth_energy, &structure);
+    let truth_bokeh = masked_mean(&truth_energy, &smooth);
+
+    let out = root().join("target/debug-out/t11/identity");
+    std::fs::create_dir_all(&out).unwrap();
+
+    let transforms = vec![Transform::IDENTITY; stack.frames.len()];
+    let by_path: HashMap<PathBuf, Transform> = stack
+        .frames
+        .iter()
+        .cloned()
+        .zip(transforms.iter().copied())
+        .collect();
+
+    let metric = WindowedLaplacian::new(4, &out, by_path.clone());
+    let focus_maps: Vec<FocusMap> = stack
+        .frames
+        .iter()
+        .map(|p| metric.evaluate(&Image::open(p).unwrap()).unwrap())
+        .collect();
+    let weights = GuidedWeights::new(
+        stack.frames.clone(),
+        transforms,
+        4,
+        1e-4,
+        GuideSpace::Perceptual,
+        &out,
+    )
+    .weights(&focus_maps)
+    .unwrap();
+    let images: Vec<Image> = stack
+        .frames
+        .iter()
+        .map(|p| Image::open(p).unwrap())
+        .collect();
+
+    let path = out.join("identity_select.tif");
+    let fused = SelectionFusion::new(&path, by_path, 32, 2)
+        .fuse(&images, &weights)
+        .unwrap();
+    let energy = laplacian_energy(&Grid::from_image(&fused, 0).unwrap());
+
+    println!("\n=== select r2, identity transforms (nothing resampled) ===");
+    println!(
+        "detail {:.3}   bokeh {:.3}",
+        masked_mean(&energy, &structure) / truth_detail,
+        masked_mean(&energy, &smooth) / truth_bokeh
+    );
+    println!("compare against select r2 with real registration: detail 0.134");
+
+    // Do NOT attribute that gap to blur without this. The masks come from the unwarped
+    // truth, and the registered output sits in the *anchor frame's* coordinates. If those
+    // differ, the "sharpest 2% of truth gradient" mask no longer lands on the fused
+    // image's edges, and measured energy collapses with no blurring involved at all — on a
+    // 1-3 px antenna a 1 px offset is enough. Phase-correlate to find out which it is.
+    let registered = root().join("target/debug-out/t11/synthetic_50_select.tif");
+    if let Ok(registered) = Image::open(&registered) {
+        let truth_image = Image::open(&stack_dir().join("ground_truth_all_in_focus.tiff")).unwrap();
+        let t = stackaroni_core::registration::PhaseCorrelation::new(1)
+            .align(&truth_image, &registered)
+            .unwrap();
+        let (cx, cy) = (truth.width as f32 / 2.0, truth.height as f32 / 2.0);
+        println!(
+            "\nregistered output vs truth: scale {:.5}  dx {:+.2}  dy {:+.2}",
+            t.scale, t.dx, t.dy
+        );
+        println!(
+            "worst-corner displacement {:.2} px",
+            ((t.scale - 1.0) * (cx * cx + cy * cy).sqrt()).abs()
+                + (t.dx * t.dx + t.dy * t.dy).sqrt()
+        );
+        println!("under ~1 px => masks still land, gap is real blur; over => gap is confounded");
+    }
+    println!();
 }
 
 /// Stitched `blend | select | ground truth` crops, because the numbers above do not
