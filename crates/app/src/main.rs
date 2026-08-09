@@ -14,12 +14,14 @@
 //! bound to the core types they mirror, because nothing consumes them yet — they get
 //! bound when a run does.
 
+mod run;
 mod stack;
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use eframe::egui;
+use run::{Outcome, Run, Settings};
 use stack::{Preview, Stack, Thumbnail};
 
 fn main() -> eframe::Result {
@@ -39,6 +41,9 @@ const PLACEHOLDER_FRAMES: usize = 8;
 /// Height of a filmstrip entry. Thumbnails are fitted inside this, letterboxed.
 const THUMBNAIL_HEIGHT: f32 = 88.0;
 
+/// Preview key for the fused result, kept clear of every real frame index.
+const RESULT_KEY: usize = usize::MAX;
+
 /// Side of the include/exclude checkbox drawn in a plate's corner.
 const BADGE: f32 = 16.0;
 
@@ -50,11 +55,9 @@ const BADGE: f32 = 16.0;
 /// different while leaving the frame recognizable enough to change your mind about.
 const EXCLUDED_OPACITY: u8 = 150;
 
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum GuideSpace {
-    Linear,
-    Perceptual,
-}
+// Bound to core's own types now that a run consumes them; they were local placeholders
+// only while nothing read them.
+use stackaroni_core::weights::GuideSpace;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum FusionRule {
@@ -95,6 +98,11 @@ struct App {
     params: Params,
     stack: Option<Stack>,
     preview: Preview,
+    run: Option<Run>,
+    /// Names each run's scratch and output uniquely.
+    run_sequence: u64,
+    /// The fused result of the last successful run, shown in place of a frame.
+    result: Option<std::path::PathBuf>,
     /// Shared with worker threads so a superseded load can be abandoned mid-decode.
     generation: Arc<AtomicU64>,
     error: Option<String>,
@@ -128,8 +136,70 @@ impl App {
     }
 }
 
+impl App {
+    fn running(&self) -> bool {
+        self.run.is_some()
+    }
+
+    fn start_run(&mut self, ctx: &egui::Context) {
+        let Some(stack) = &self.stack else { return };
+        let frames = run::included_paths(stack);
+        if frames.len() < 2 {
+            self.error = Some("a run needs at least two included frames".into());
+            return;
+        }
+        self.run_sequence += 1;
+        let settings = Settings {
+            registration_level: self.params.registration_level,
+            focus_radius: self.params.focus_radius,
+            guide_radius: self.params.guide_radius,
+            guide_epsilon: self.params.guide_epsilon,
+            guide_space: self.params.guide_space,
+            select_fusion: self.params.fusion == FusionRule::Select,
+            salience_radius: self.params.salience_radius,
+            pyramid_floor: self.params.pyramid_floor,
+        };
+        match Run::start(frames, settings, ctx.clone(), self.run_sequence) {
+            Ok(run) => {
+                self.error = None;
+                self.result = None;
+                self.run = Some(run);
+            }
+            Err(e) => self.error = Some(format!("could not start the run: {e}")),
+        }
+    }
+
+    /// Collect a finished run. Only clears `self.run` once the worker has exited, which
+    /// is what re-enables every control — see `run.rs`.
+    fn poll_run(&mut self, ctx: &egui::Context) {
+        let Some(run) = &mut self.run else { return };
+        match run.poll() {
+            None => {
+                // Heartbeat, so the spinner animates and liveness does not depend on a
+                // progress call landing between passes. Not a full-rate repaint loop:
+                // this runs for twenty minutes.
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+            Some(outcome) => {
+                self.run = None;
+                match outcome {
+                    Outcome::Done(path) => {
+                        self.preview = Preview::default();
+                        self.result = Some(path);
+                    }
+                    // Nothing to preserve: the write is never interrupted, so a cancelled
+                    // run has produced no output and leaves the view as it was.
+                    Outcome::Cancelled => {}
+                    Outcome::Failed(error) => self.error = Some(error),
+                }
+            }
+        }
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.poll_run(ui.ctx());
         // Collect whatever the decoder finished since the last pass, and keep painting
         // while it works so thumbnails appear as they land rather than all at the end.
         if let Some(stack) = &mut self.stack {
@@ -184,14 +254,49 @@ impl App {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            if ui.button("Open folder…").clicked() {
+            let running = self.running();
+
+            // Everything except Cancel is disabled while a run is live: the parameters
+            // it was started with are fixed, and a second run would collide with the
+            // first over scratch and output.
+            if ui
+                .add_enabled(!running, egui::Button::new("Open folder…"))
+                .clicked()
+            {
                 self.open_folder();
             }
             ui.separator();
-            // Still disabled: nothing behind them yet, and a button that does nothing is
-            // worse than one that is visibly not ready.
-            ui.add_enabled(false, egui::Button::new("Run stack"));
-            ui.add_enabled(false, egui::Button::new("Export…"));
+
+            match &self.run {
+                None => {
+                    let ready = self.stack.is_some();
+                    if ui
+                        .add_enabled(ready, egui::Button::new("Run stack"))
+                        .clicked()
+                    {
+                        let ctx = ui.ctx().clone();
+                        self.start_run(&ctx);
+                    }
+                }
+                Some(run) => {
+                    // Flips the instant it is pressed, before the pipeline notices.
+                    // Perceived responsiveness is the acknowledgement, not the stop
+                    // latency — the worst case is one frame of fusion behind it.
+                    let requested = run.shared.cancel_requested();
+                    let label = if requested { "Cancelling…" } else { "Cancel" };
+                    if ui
+                        .add_enabled(!requested, egui::Button::new(label))
+                        .clicked()
+                    {
+                        run.shared.cancel();
+                    }
+                }
+            }
+
+            ui.add_enabled(
+                !running && self.result.is_some(),
+                egui::Button::new("Export…"),
+            );
             ui.separator();
 
             match (&self.error, &self.stack) {
@@ -231,6 +336,28 @@ impl App {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(2.0);
+        if let Some(run) = &self.run {
+            let (stage, done, total) = run.shared.snapshot();
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(egui::RichText::new(stage.label()).strong());
+                let fraction = if total == 0 {
+                    0.0
+                } else {
+                    done as f32 / total as f32
+                };
+                ui.add(
+                    egui::ProgressBar::new(fraction)
+                        .desired_width(220.0)
+                        .text(format!("{done}/{total}")),
+                );
+                if run.shared.cancel_requested() {
+                    ui.label(egui::RichText::new("stopping after this frame").weak());
+                }
+            });
+            ui.add_space(2.0);
+            return;
+        }
         ui.horizontal(|ui| {
             match &self.stack {
                 Some(stack) if stack.is_loading() => {
@@ -261,6 +388,14 @@ impl App {
     }
 
     fn filmstrip(&mut self, ui: &mut egui::Ui) {
+        // Selection and exclusion both freeze during a run: the frame list was captured
+        // when it started, so changing it would misrepresent what is being stacked.
+        let running = self.running();
+        ui.add_enabled_ui(!running, |ui| self.filmstrip_inner(ui));
+        let _ = running;
+    }
+
+    fn filmstrip_inner(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.label(egui::RichText::new("Frames").strong());
         ui.add_space(4.0);
@@ -375,6 +510,9 @@ impl App {
         // unrelated input (a mouse move, or a second click) triggers a pass.
         if let Some(index) = clicked {
             self.selected = index;
+            // Picking a frame leaves the fused-result view; the run is still available
+            // through Export, it is just no longer what the pane is showing.
+            self.result = None;
             ui.ctx().request_repaint();
         }
         if let Some(index) = toggled {
@@ -386,14 +524,15 @@ impl App {
     }
 
     fn preview(&mut self, ui: &mut egui::Ui) {
-        let heading = match &self.stack {
-            Some(stack) => stack
+        let heading = match (&self.result, &self.stack) {
+            (Some(_), _) => "fused result".to_string(),
+            (None, Some(stack)) => stack
                 .frames
                 .get(self.selected)
                 .and_then(|f| f.path.file_name())
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            None => String::new(),
+            (None, None) => String::new(),
         };
         ui.vertical_centered(|ui| {
             ui.add_space(6.0);
@@ -413,24 +552,32 @@ impl App {
             egui::StrokeKind::Inside,
         );
 
-        let Some(stack) = &self.stack else {
-            label_in(
-                ui,
-                rect,
-                "open a folder to begin",
-                visuals.weak_text_color(),
-            );
-            return;
-        };
-        let Some(frame) = stack.frames.get(self.selected) else {
-            return;
+        // A finished run takes over the pane until another frame is selected. Keyed by
+        // `RESULT_KEY` so it cannot be confused with a frame index.
+        let (path, key, included) = match &self.result {
+            Some(result) => (result.clone(), RESULT_KEY, true),
+            None => {
+                let Some(stack) = &self.stack else {
+                    label_in(
+                        ui,
+                        rect,
+                        "open a folder to begin",
+                        visuals.weak_text_color(),
+                    );
+                    return;
+                };
+                let Some(frame) = stack.frames.get(self.selected) else {
+                    return;
+                };
+                (frame.path.clone(), self.selected, frame.included)
+            }
         };
 
         // Sized from the pane rather than a constant, so a large window gets a sharper
         // preview and a small one does not decode pixels it will immediately throw away.
         // Doubled for a little headroom against resizing and HiDPI.
         let target = (rect.width() * 2.0).clamp(512.0, 3000.0) as usize;
-        self.preview.request(&frame.path, self.selected, target);
+        self.preview.request(&path, key, target);
 
         match (&self.preview.texture, &self.preview.error) {
             (_, Some(error)) => label_in(ui, rect, error, visuals.error_fg_color),
@@ -439,7 +586,7 @@ impl App {
                 let image = egui::Image::new(texture);
                 // Dimmed to match the filmstrip, so the preview cannot contradict what
                 // the badge says about whether this frame is in the run.
-                let image = if frame.included {
+                let image = if included {
                     image
                 } else {
                     image.tint(egui::Color32::from_white_alpha(EXCLUDED_OPACITY))
@@ -461,50 +608,59 @@ impl App {
     }
 
     fn parameters(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.add_space(6.0);
-                ui.label(egui::RichText::new("Parameters").strong());
-                ui.add_space(6.0);
+        // Locked during a run: these are the settings it was started with, and letting
+        // them move would show a configuration that does not match what is executing.
+        let running = self.running();
+        ui.add_enabled_ui(!running, |ui| {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("Parameters").strong());
+                    ui.add_space(6.0);
 
-                let p = &mut self.params;
+                    let p = &mut self.params;
 
-                ui.label("Registration");
-                ui.add(egui::Slider::new(&mut p.registration_level, 0..=5).text("level"));
-                ui.add_space(8.0);
+                    ui.label("Registration");
+                    ui.add(egui::Slider::new(&mut p.registration_level, 0..=5).text("level"));
+                    ui.add_space(8.0);
 
-                ui.label("Focus measure");
-                ui.add(egui::Slider::new(&mut p.focus_radius, 1..=16).text("radius"));
-                ui.add_space(8.0);
+                    ui.label("Focus measure");
+                    ui.add(egui::Slider::new(&mut p.focus_radius, 1..=16).text("radius"));
+                    ui.add_space(8.0);
 
-                ui.label("Weight refinement");
-                ui.add(egui::Slider::new(&mut p.guide_radius, 1..=16).text("guide radius"));
-                ui.add(
-                    egui::Slider::new(&mut p.guide_epsilon, 1e-5..=1e-1)
-                        .logarithmic(true)
-                        .text("epsilon"),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("guide:");
-                    ui.selectable_value(&mut p.guide_space, GuideSpace::Linear, "linear");
-                    ui.selectable_value(&mut p.guide_space, GuideSpace::Perceptual, "perceptual");
+                    ui.label("Weight refinement");
+                    ui.add(egui::Slider::new(&mut p.guide_radius, 1..=16).text("guide radius"));
+                    ui.add(
+                        egui::Slider::new(&mut p.guide_epsilon, 1e-5..=1e-1)
+                            .logarithmic(true)
+                            .text("epsilon"),
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("guide:");
+                        ui.selectable_value(&mut p.guide_space, GuideSpace::Linear, "linear");
+                        ui.selectable_value(
+                            &mut p.guide_space,
+                            GuideSpace::Perceptual,
+                            "perceptual",
+                        );
+                    });
+                    ui.add_space(8.0);
+
+                    ui.label("Fusion");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut p.fusion, FusionRule::Blend, "blend");
+                        ui.selectable_value(&mut p.fusion, FusionRule::Select, "select");
+                    });
+                    // Only the selection rule reads this, matching the CLI, where it is
+                    // documented as ignored by `blend`.
+                    ui.add_enabled(
+                        p.fusion == FusionRule::Select,
+                        egui::Slider::new(&mut p.salience_radius, 0..=4).text("salience radius"),
+                    );
+                    ui.add(egui::Slider::new(&mut p.pyramid_floor, 8..=128).text("pyramid floor"));
                 });
-                ui.add_space(8.0);
-
-                ui.label("Fusion");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut p.fusion, FusionRule::Blend, "blend");
-                    ui.selectable_value(&mut p.fusion, FusionRule::Select, "select");
-                });
-                // Only the selection rule reads this, matching the CLI, where it is
-                // documented as ignored by `blend`.
-                ui.add_enabled(
-                    p.fusion == FusionRule::Select,
-                    egui::Slider::new(&mut p.salience_radius, 0..=4).text("salience radius"),
-                );
-                ui.add(egui::Slider::new(&mut p.pyramid_floor, 8..=128).text("pyramid floor"));
-            });
+        });
     }
 }
 
