@@ -69,8 +69,10 @@ jobs:
 
       # eframe pulls in winit and the glow renderer, which need X11/Wayland and GL
       # headers at build time. These are absent from the Ubuntu runner image.
-      # Adding `rfd` for native file dialogs, which CLAUDE.md plans, will also need
-      # `libgtk-3-dev` here.
+      #
+      # `rfd` needs nothing added: 0.17 defaults to the XDG desktop portal backend
+      # (pure Rust, via ashpd/zbus) rather than GTK, so no `libgtk-3-dev`. If the
+      # `gtk3` feature is ever enabled explicitly, that changes.
       - name: Install Linux windowing dependencies
         if: runner.os == 'Linux'
         run: |
