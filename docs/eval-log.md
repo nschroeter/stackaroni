@@ -5,6 +5,15 @@ Append a new row after any change that could affect output quality — don't
 edit or delete old rows, even if the approach was later abandoned; the
 history of what didn't work is as useful as what did.
 
+**Keep "Current state" below in sync in the same commit as the row that
+changes it.** Append-only chronology records what happened but not what is
+true now, and past ~15 rows that becomes unreadable: a row can be retracted
+two rows later and still read as open. This happened — a halo finding logged
+as "needs Niels's rating" stayed that way after being retracted and closed
+further down. Updating the block is part of logging, not a follow-up. A row
+changes what is live when it: ships a new parameter set, retracts or
+supersedes an earlier claim, or resolves an open question.
+
 Score is 1-5 against the quality checklist in `CLAUDE.md`:
 
 1. No visible seams/halos around high-contrast edges (antennae, legs, hair boundaries)
@@ -15,6 +24,35 @@ Score is 1-5 against the quality checklist in `CLAUDE.md`:
 Log one row per stack tested if scores differ between stacks (they often
 will — e.g. the synthetic stack's thin antenna lines tend to expose halo
 problems that the blossom stack won't).
+
+## Current state
+
+*Updated with `1f06c65`. Update this block in the same commit as any row that changes it.*
+
+**Live configuration** — guided filter radius 4, epsilon 1e-4, guide space perceptual;
+focus radius 4; registration phase-correlation similarity at level 3, chained outward
+from the middle frame; pyramid floor 32 px.
+
+**Current outputs** — `test-data/<stack>/stackaroni_fused.tif`, byte-identical copies at
+`target/debug-out/t10/<stack>.tif`, per-stage debug at `target/debug-out/t10/debug/<stack>/`.
+
+**Awaiting a rating** — the `e2e6b8a` retune row, covering blossom, ruler and
+synthetic_50. That is the only row waiting on a human score; every other row is either
+closed or not scoreable.
+
+**Scores in the log that are NOT live** — `51d6833` (1-2) and `6e638d7` (3 provisional)
+both score the superseded radius-8/eps-1e-2 configuration, and both are my own reads, not
+Niels's. The `e2e6b8a` halo row reads "needs Niels's rating" but was retracted and closed
+below it; nothing there to rate.
+
+**Open, not blocking** — T5b item 1, chained registration drift (measured secondary,
+~11% of degradation); ~7.6 effective frames averaged per pixel on blossom against an
+ideal of 1-3; a ring of high-index labels at the subject boundary, traced to the focus
+window straddling depth discontinuities rather than to fusion.
+
+**Standing caution** — five measurement errors so far, four overstating a defect and one
+asserting a defect that did not exist. A claim of a *new* defect needs both a measurement
+and a look at the image before it goes in the log.
 
 | Date | Commit | Stack | Change | Score (1-5) | Notes |
 |---|---|---|---|---|---|
