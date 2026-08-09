@@ -140,6 +140,9 @@ Rate every candidate output against this list (this is my rubric, not a proxy me
   final images, and log the result in `docs/eval-log.md`: git commit hash, what changed, my
   score (1-5) against the checklist above, and notes. Don't skip logging — this is what lets us
   avoid re-litigating the same failed approach across sessions.
+- `docs/eval-log.md` keeps a "Current state" block at the top — update it in the
+  same commit as any row that changes what's current, not as a follow-up. Past
+  ~15 rows, an append-only log with no current-state summary becomes unreadable.
 - If an algorithm choice needs validating before a full Rust implementation, it's fine to
   prototype it quickly in Python/OpenCV against the test set first, confirm it scores well, and
   then port the validated approach into Rust — don't debug algorithm correctness and Rust
@@ -157,6 +160,14 @@ Rate every candidate output against this list (this is my rubric, not a proxy me
 - `cargo build`, `cargo test`, `cargo run -p stackaroni-app` (GUI),
   `cargo run -p stackaroni-cli -- ...` (headless eval).
 - Run `cargo fmt` and `cargo clippy` before considering a change finished.
+
+# Verifying changes
+
+Use `Edit` for source changes, not scripted find-replace — `Edit` fails loudly when its
+pattern doesn't match, scripted replaces fail silently. `cargo fmt` reformats code between
+sessions, so a pattern that matched yesterday may not today. After changing behaviour,
+verify with a freshly built binary; a stale `target/release` binary will happily reproduce
+the old behaviour. Add a test covering the new case in the same change.
 
 # Out of scope for now
 
