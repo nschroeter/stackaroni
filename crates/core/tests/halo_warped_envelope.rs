@@ -16,7 +16,7 @@
 //! the same coordinate system. If the fused still exceeds the max, fusion is
 //! injecting energy; if not, the earlier signal was displacement.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use stackaroni_core::discovery::discover_stack;
 use stackaroni_core::grid::Grid;
@@ -119,8 +119,8 @@ fn fused_stays_within_the_warped_source_envelope() {
     }
 
     println!(
-        "\n{:>6}  {:>9}  {:>9}  {:>9}  {}",
-        "x", "fused", "src min", "src max", "verdict"
+        "\n{:>6}  {:>9}  {:>9}  {:>9}  verdict",
+        "x", "fused", "src min", "src max"
     );
     for i in (0..WIDTH as usize).step_by(12) {
         let v = if fused_profile[i] > hi[i] {
