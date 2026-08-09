@@ -1,11 +1,15 @@
 name: CI
 
-# Push to main only. The test suite here is the fixture-free subset (see below), so
-# it says nothing about output quality — that still comes from running the CLI against
-# `test-data/` locally and rating the result, per the evaluation workflow in CLAUDE.md.
+# Tests run on every push to main. The build job is manual only — see the note above it.
+#
+# The test suite here is the fixture-free subset (see below), so it says nothing about
+# output quality — that still comes from running the CLI against `test-data/` locally
+# and rating the result, per the evaluation workflow in CLAUDE.md.
 on:
   push:
     branches: [main]
+  # The build job runs only from here; see its `if:` below.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -37,103 +41,102 @@ jobs:
         run: cargo test --workspace
 
   # ---------------------------------------------------------------------------
-  # DISABLED, TEMPORARILY -- out of GitHub Actions minutes.
+  # MANUAL ONLY -- Actions minutes are short, so this does not run on push.
   #
-  # Commented out rather than deleted so it comes back verbatim: the macOS runner
-  # pin, the arm64 assertion and the Linux windowing package list are all things
-  # that were worked out once and would be re-derived wrongly from memory.
+  #   gh workflow run CI --ref main
   #
-  # RE-ENABLE BEFORE EITHER OF:
-  #   - merging UI work to a stable point, or
-  #   - giving anyone outside this machine a build to try.
+  # Kept in full rather than deleted: the macOS runner pin, the arm64 assertion and
+  # the Linux windowing package list were each worked out once and would be
+  # re-derived wrongly from memory.
   #
-  # The second matters most: these are the only binaries anyone else can run, and
-  # nothing else in the project builds the app for Windows or Linux. Until this is
-  # back on, "it compiles" means "it compiles on this Mac" -- the test job above
-  # runs on Linux but never builds `stackaroni-app`, so a break in eframe's
-  # platform-specific windowing code would go unnoticed.
+  # RUN IT AT LEAST BEFORE:
+  #   - giving anyone outside this machine a build to try, and
+  #   - any stretch of UI work that adds or changes a platform-facing dependency.
   #
-  # Note also that this job has never yet run against `rfd`: it was added to the
-  # app after the last successful build run, so its Linux xdg-portal backend is
-  # unverified on a real Ubuntu runner.
+  # Why it matters that this is off by default: nothing else builds the app for
+  # Windows or Linux. The test job above runs on Linux but never builds
+  # `stackaroni-app`, so between manual runs "it compiles" means "it compiles on this
+  # Mac", and a break in eframe's or rfd's platform-specific code goes unnoticed.
   # ---------------------------------------------------------------------------
-  # build:
-  #   name: build ${{ matrix.name }}
-  #   runs-on: ${{ matrix.runner }}
-  #   strategy:
-  #     # One platform failing should not hide the state of the other two.
-  #     fail-fast: false
-  #     matrix:
-  #       include:
-  #         - name: linux-x86_64
-  #           runner: ubuntu-latest
-  #           binary: stackaroni-app
-  #         - name: windows-x86_64
-  #           runner: windows-latest
-  #           binary: stackaroni-app.exe
-  #         # Pinned rather than `macos-latest`. That label maps to macOS 26 Arm64 as of
-  #         # 2026-08, but GitHub has moved it across architectures before — it was Intel
-  #         # until the macOS 14 image — and a silent flip would ship an x86_64 binary
-  #         # labelled as Apple Silicon. `macos-15` is documented Arm64; the step below
-  #         # asserts the built binary really is arm64 so any future drift fails loudly
-  #         # instead of being discovered by a user.
-  #         - name: macos-aarch64
-  #           runner: macos-15
-  #           binary: stackaroni-app
-  #
-  #   steps:
-  #     - uses: actions/checkout@v5
-  #
-  #     - uses: dtolnay/rust-toolchain@stable
-  #
-  #     - uses: Swatinem/rust-cache@v2
-  #
-  #     # eframe pulls in winit and the glow renderer, which need X11/Wayland and GL
-  #     # headers at build time. These are absent from the Ubuntu runner image.
-  #     #
-  #     # `rfd` needs nothing added: 0.17 defaults to the XDG desktop portal backend
-  #     # (pure Rust, via ashpd/zbus) rather than GTK, so no `libgtk-3-dev`. If the
-  #     # `gtk3` feature is ever enabled explicitly, that changes.
-  #     - name: Install Linux windowing dependencies
-  #       if: runner.os == 'Linux'
-  #       run: |
-  #         sudo apt-get update
-  #         sudo apt-get install -y \
-  #           libxkbcommon-dev \
-  #           libwayland-dev \
-  #           libx11-dev \
-  #           libxcursor-dev \
-  #           libxi-dev \
-  #           libxrandr-dev \
-  #           libxcb-render0-dev \
-  #           libxcb-shape0-dev \
-  #           libxcb-xfixes0-dev \
-  #           libgl1-mesa-dev
-  #
-  #     # Native runner per OS, no cross-compilation: the windowing and GL dependencies
-  #     # above are platform-specific and fragile to cross-build.
-  #     - name: Build the app
-  #       run: cargo build --release -p stackaroni-app
-  #
-  #     - name: Confirm the macOS binary is Apple Silicon
-  #       if: runner.os == 'macOS'
-  #       run: |
-  #         set -eu
-  #         file target/release/stackaroni-app
-  #         archs=$(lipo -archs target/release/stackaroni-app)
-  #         echo "architectures: $archs"
-  #         case "$archs" in
-  #           *arm64*) echo "arm64 confirmed" ;;
-  #           *) echo "::error::expected an arm64 binary, got '$archs'"; exit 1 ;;
-  #         esac
-  #
-  #     # v6, not v5: upload-artifact v5 still declares `using: node20` and only had
-  #     # preliminary Node 24 support, so bumping both actions to v5 would silence the
-  #     # deprecation warning for checkout and leave it in place for this one. checkout
-  #     # switched at v5, upload-artifact at v6 — the majors are not in step.
-  #     - uses: actions/upload-artifact@v6
-  #       with:
-  #         name: stackaroni-app-${{ matrix.name }}
-  #         path: target/release/${{ matrix.binary }}
-  #         if-no-files-found: error
-  #
+  build:
+    name: build ${{ matrix.name }}
+    # Manual only: `gh workflow run CI --ref main`, or the Actions tab. Kept off
+    # the push trigger while Actions minutes are short — see the note above.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            binary: stackaroni-app
+          - name: windows-x86_64
+            runner: windows-latest
+            binary: stackaroni-app.exe
+          # Pinned rather than `macos-latest`. That label maps to macOS 26 Arm64 as of
+          # 2026-08, but GitHub has moved it across architectures before — it was Intel
+          # until the macOS 14 image — and a silent flip would ship an x86_64 binary
+          # labelled as Apple Silicon. `macos-15` is documented Arm64; the step below
+          # asserts the built binary really is arm64 so any future drift fails loudly
+          # instead of being discovered by a user.
+          - name: macos-aarch64
+            runner: macos-15
+            binary: stackaroni-app
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # eframe pulls in winit and the glow renderer, which need X11/Wayland and GL
+      # headers at build time. These are absent from the Ubuntu runner image.
+      #
+      # `rfd` needs nothing added: 0.17 defaults to the XDG desktop portal backend
+      # (pure Rust, via ashpd/zbus) rather than GTK, so no `libgtk-3-dev`. If the
+      # `gtk3` feature is ever enabled explicitly, that changes.
+      - name: Install Linux windowing dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libgl1-mesa-dev
+
+      # Native runner per OS, no cross-compilation: the windowing and GL dependencies
+      # above are platform-specific and fragile to cross-build.
+      - name: Build the app
+        run: cargo build --release -p stackaroni-app
+
+      - name: Confirm the macOS binary is Apple Silicon
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          file target/release/stackaroni-app
+          archs=$(lipo -archs target/release/stackaroni-app)
+          echo "architectures: $archs"
+          case "$archs" in
+            *arm64*) echo "arm64 confirmed" ;;
+            *) echo "::error::expected an arm64 binary, got '$archs'"; exit 1 ;;
+          esac
+
+      # v6, not v5: upload-artifact v5 still declares `using: node20` and only had
+      # preliminary Node 24 support, so bumping both actions to v5 would silence the
+      # deprecation warning for checkout and leave it in place for this one. checkout
+      # switched at v5, upload-artifact at v6 — the majors are not in step.
+      - uses: actions/upload-artifact@v6
+        with:
+          name: stackaroni-app-${{ matrix.name }}
+          path: target/release/${{ matrix.binary }}
+          if-no-files-found: error
