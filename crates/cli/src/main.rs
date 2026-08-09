@@ -14,7 +14,7 @@ use stackaroni_core::focus::WindowedLaplacian;
 use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
 use stackaroni_core::grid::Grid;
 use stackaroni_core::pipeline::{
-    FocusMap, FocusMetric, Image, ImageFusion, Transform, WeightEstimator,
+    FocusMap, FocusMetric, Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
 };
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
@@ -113,6 +113,24 @@ impl From<GuideSpaceArg> for GuideSpace {
     }
 }
 
+/// The CLI's `RunControl`: prints progress when `-v`, never cancels.
+///
+/// Cancellation is the app's concern — a headless batch run has nobody to press a
+/// button — but progress reporting is shared, which is why one trait carries both.
+struct Progress {
+    verbose: bool,
+}
+
+impl RunControl for Progress {
+    fn progress(&self, stage: Stage, done: usize, total: usize) {
+        // Every tenth frame and the last one: a 100-frame stack would otherwise emit
+        // 400 lines, and the timings printed per stage are the useful record.
+        if self.verbose && (done.is_multiple_of(10) || done == total) {
+            println!("  {} {done}/{total}", stage.label());
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -182,8 +200,15 @@ fn run(cli: &Cli, stack: &Stack, output: &Path) -> Result<()> {
 
     let result = pipeline(cli, stack, output, &scratch, debug_dir.as_deref());
 
-    // Only on success: a failed run's scratch is worth keeping to inspect.
-    if result.is_ok() {
+    // A failed run's scratch is worth keeping to inspect. A *cancelled* one is not —
+    // it is a deliberate stop with nothing to debug — so it cleans up like a success.
+    // The CLI cannot currently cancel, but the branch belongs with the rule rather than
+    // with the caller that first exercises it.
+    let cancelled = matches!(
+        result.as_ref().err().and_then(|e| e.downcast_ref()),
+        Some(stackaroni_core::error::Error::Cancelled)
+    );
+    if result.is_ok() || cancelled {
         let _ = std::fs::remove_dir_all(&scratch);
     } else {
         eprintln!("scratch kept for inspection at {}", scratch.display());
@@ -208,13 +233,13 @@ fn pipeline(
     let frames = stack.frames.len();
     let verbose = cli.verbose;
 
+    // The CLI never cancels; `Progress` only prints. `()` would also be a complete
+    // implementation, and is what the tests pass.
+    let run = Progress { verbose };
+
     let step = Instant::now();
     let registration = PhaseCorrelation::new(cli.registration_level);
-    let transforms = register_stack(&registration, &stack.frames, |done, total| {
-        if verbose && (done % 10 == 0 || done == total) {
-            println!("  register {done}/{total}");
-        }
-    })?;
+    let transforms = register_stack(&registration, &stack.frames, &run)?;
     let (lo, hi) = transforms.iter().fold((f32::MAX, f32::MIN), |(lo, hi), t| {
         (lo.min(t.scale), hi.max(t.scale))
     });
@@ -234,10 +259,8 @@ fn pipeline(
     let metric = WindowedLaplacian::new(cli.focus_radius, scratch, by_path.clone());
     let mut focus_maps: Vec<FocusMap> = Vec::with_capacity(frames);
     for (i, path) in stack.frames.iter().enumerate() {
-        focus_maps.push(metric.evaluate(&Image::open(path)?)?);
-        if verbose && (i + 1) % 10 == 0 {
-            println!("  focus {}/{frames}", i + 1);
-        }
+        focus_maps.push(metric.evaluate(&Image::open(path)?, &run)?);
+        run.progress(Stage::Focus, i + 1, frames);
     }
     println!("  focus     {:>5.0}s", step.elapsed().as_secs_f32());
 
@@ -253,10 +276,10 @@ fn pipeline(
     if let Some(dir) = debug_dir {
         debug::write_plane(
             &dir.join("labels_argmax.png"),
-            &estimator.labels(&focus_maps)?,
+            &estimator.labels(&focus_maps, &run)?,
         )?;
     }
-    let weights = estimator.weights(&focus_maps)?;
+    let weights = estimator.weights(&focus_maps, &run)?;
     println!("  weights   {:>5.0}s", step.elapsed().as_secs_f32());
 
     if let Some(dir) = debug_dir {
@@ -282,7 +305,7 @@ fn pipeline(
             cli.salience_radius,
         )),
     };
-    let fused = fusion.fuse(&images, &weights)?;
+    let fused = fusion.fuse(&images, &weights, &run)?;
     println!("  fuse      {:>5.0}s", step.elapsed().as_secs_f32());
 
     if let Some(dir) = debug_dir {

@@ -122,7 +122,7 @@ fn black_point_and_contrast_on_the_tick_marks() {
                 return Transform::IDENTITY;
             }
             let ours = &open.iter().find(|(l, _)| *l == "select").expect("select").1;
-            let t = PhaseCorrelation::new(3).align(ours, image).unwrap();
+            let t = PhaseCorrelation::new(3).align(ours, image, &()).unwrap();
             let shift = (t.dx * t.dx + t.dy * t.dy).sqrt();
             let (rx, ry) = (
                 x0 as f32 + w as f32 / 2.0 - cx,

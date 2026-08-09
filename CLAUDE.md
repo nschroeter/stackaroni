@@ -54,18 +54,47 @@ benchmarked against each other without rewriting the app:
 
 ```rust
 trait Registration {
-    fn align(&self, reference: &Image, target: &Image) -> Result<Transform>;
+    fn align(&self, reference: &Image, target: &Image, run: &dyn RunControl) -> Result<Transform>;
 }
 trait FocusMetric {
-    fn evaluate(&self, image: &Image) -> Result<FocusMap>;
+    fn evaluate(&self, image: &Image, run: &dyn RunControl) -> Result<FocusMap>;
 }
 trait WeightEstimator {
-    fn weights(&self, focus_maps: &[FocusMap]) -> Result<WeightMaps>;
+    fn weights(&self, focus_maps: &[FocusMap], run: &dyn RunControl) -> Result<WeightMaps>;
 }
 trait ImageFusion {
-    fn fuse(&self, images: &[Image], weights: &WeightMaps) -> Result<Image>;
+    fn fuse(&self, images: &[Image], weights: &WeightMaps, run: &dyn RunControl) -> Result<Image>;
 }
 ```
+
+`RunControl` carries cancellation and progress together — `cancelled() -> bool` and
+`progress(stage, done, total)`, both defaulted, so `()` is a complete implementation for
+callers that do neither (the CLI passes a printing impl; tests pass `()`). One trait, not
+two, because both need the same checkpoints: a stage that can report "frame 47 of 100" is
+exactly a stage that can be stopped at frame 47.
+
+It is a *method* parameter, not constructor-injected like an output path or guide images,
+because it is a property of the call rather than of the stage, and because these traits
+are a multiply-implemented public surface — an implementer who never sees it in the
+signature has nothing telling them cancellation is expected. That is also why it is on
+all four even though `align` and `evaluate` do not poll it today: each handles a single
+frame, so their loops live in the caller, but ECC affine registration (§10 of
+`docs/algorithms.md`) iterates *inside* `align`, and adding the parameter then would be a
+breaking change.
+
+Checks go at per-frame granularity inside `weights` and `fuse` — plus `labels` and
+`normalize`, which are full banded passes over every plane before and after the per-frame
+loop. Worst-case stop latency is therefore about one frame of fusion, ~6 s on a 50 MP
+stack. **Sub-frame checks were considered and deliberately left out:** responsiveness is
+dominated by whether the UI acknowledges the click immediately, not by true stop latency,
+and a 6 s tail on a 20-minute operation reads as normal. Revisit only if it actually feels
+slow. Never check inside the final `write_rgb16_srgb` — a truncated TIFF that looks like a
+real output is worse than finishing the write.
+
+`Error::Cancelled` is the one error variant that is not a fault. Callers should clean up
+scratch on it rather than keeping it for inspection, and treat the run as never having
+happened — there is no partial output to preserve, precisely because the write is never
+interrupted.
 
 `Result` is `stackaroni_core::error::Result`, over a typed `Error` enum rather than
 `anyhow`. `core` is a library boundary consumed by both `cli` and `app`, and the

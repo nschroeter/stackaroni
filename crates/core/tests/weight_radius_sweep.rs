@@ -131,7 +131,7 @@ fn guide_radius_sweep() {
     let focus_maps: Vec<FocusMap> = stack
         .frames
         .iter()
-        .map(|p| metric.evaluate(&Image::open(p).unwrap()).unwrap())
+        .map(|p| metric.evaluate(&Image::open(p).unwrap(), &()).unwrap())
         .collect();
 
     let images: Vec<Image> = stack
@@ -160,11 +160,11 @@ fn guide_radius_sweep() {
                 GuideSpace::Perceptual,
                 &scratch,
             );
-            let weights = estimator.weights(&focus_maps).unwrap();
+            let weights = estimator.weights(&focus_maps, &()).unwrap();
 
             let path = scratch.join("fused.tif");
             let fusion = LaplacianPyramidFusion::new(&path, by_path.clone(), PYRAMID_FLOOR);
-            let fused = fusion.fuse(&images, &weights).unwrap();
+            let fused = fusion.fuse(&images, &weights, &()).unwrap();
             let got = Grid::from_image(&fused, 0).unwrap();
 
             let energy = laplacian_energy(&got);
@@ -255,7 +255,7 @@ fn render_candidate_configs() {
     let focus_maps: Vec<FocusMap> = stack
         .frames
         .iter()
-        .map(|p| metric.evaluate(&Image::open(p).unwrap()).unwrap())
+        .map(|p| metric.evaluate(&Image::open(p).unwrap(), &()).unwrap())
         .collect();
     let images: Vec<Image> = stack
         .frames
@@ -274,10 +274,10 @@ fn render_candidate_configs() {
             GuideSpace::Perceptual,
             &scratch,
         );
-        let weights = estimator.weights(&focus_maps).unwrap();
+        let weights = estimator.weights(&focus_maps, &()).unwrap();
         let path = out.join(format!("r{radius}.tif"));
         LaplacianPyramidFusion::new(&path, by_path.clone(), PYRAMID_FLOOR)
-            .fuse(&images, &weights)
+            .fuse(&images, &weights, &())
             .unwrap();
         drop(weights);
         let _ = std::fs::remove_dir_all(&scratch);

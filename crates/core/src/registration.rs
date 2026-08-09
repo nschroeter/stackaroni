@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex32;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::grid::Grid;
-use crate::pipeline::{Image, Registration, Transform};
+use crate::pipeline::{Image, Registration, RunControl, Stage, Transform};
 
 /// Whitening regularizer, as a fraction of the strongest cross-spectrum bin.
 const WHITENING_EPS: f32 = 1e-3;
@@ -48,7 +48,11 @@ impl PhaseCorrelation {
 }
 
 impl Registration for PhaseCorrelation {
-    fn align(&self, reference: &Image, target: &Image) -> Result<Transform> {
+    /// `run` is accepted and not polled: one call is one frame pair, so the loop that
+    /// could be stopped lives in [`register_stack`], which does check. An `align` that
+    /// iterates internally — ECC affine, `docs/algorithms.md` §10 — would poll it.
+    fn align(&self, reference: &Image, target: &Image, run: &dyn RunControl) -> Result<Transform> {
+        let _ = run;
         let a = Grid::from_image(reference, self.level)?;
         let b = Grid::from_image(target, self.level)?;
         let est = correlate_similarity(&a, &b);
@@ -213,7 +217,7 @@ fn fft2(buf: &mut [Complex32], w: usize, h: usize, planner: &mut FftPlanner<f32>
 pub fn register_stack(
     registration: &dyn Registration,
     frames: &[PathBuf],
-    mut progress: impl FnMut(usize, usize),
+    run: &dyn RunControl,
 ) -> Result<Vec<Transform>> {
     let n = frames.len();
     let mut transforms = vec![Transform::IDENTITY; n];
@@ -223,22 +227,31 @@ pub fn register_stack(
     let anchor = n / 2;
     let mut done = 0;
 
+    // Checked once per pair, which is the natural unit here: a pair is ~1.6 s at the
+    // default level, and transforms chain outward from the anchor so there is no
+    // smaller step that leaves the result consistent.
     for i in anchor + 1..n {
+        if run.cancelled() {
+            return Err(Error::Cancelled);
+        }
         let prev = Image::open(&frames[i - 1])?;
         let curr = Image::open(&frames[i])?;
-        let step = registration.align(&prev, &curr)?;
+        let step = registration.align(&prev, &curr, run)?;
         transforms[i] = transforms[i - 1].then(step);
         done += 1;
-        progress(done, n - 1);
+        run.progress(Stage::Register, done, n - 1);
     }
 
     for i in (0..anchor).rev() {
+        if run.cancelled() {
+            return Err(Error::Cancelled);
+        }
         let next = Image::open(&frames[i + 1])?;
         let curr = Image::open(&frames[i])?;
-        let step = registration.align(&next, &curr)?;
+        let step = registration.align(&next, &curr, run)?;
         transforms[i] = transforms[i + 1].then(step);
         done += 1;
-        progress(done, n - 1);
+        run.progress(Stage::Register, done, n - 1);
     }
 
     Ok(transforms)

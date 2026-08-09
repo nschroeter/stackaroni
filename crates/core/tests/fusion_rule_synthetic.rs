@@ -196,7 +196,7 @@ fn how_much_detail_does_the_warp_itself_cost() {
     let focus_maps: Vec<FocusMap> = stack
         .frames
         .iter()
-        .map(|p| metric.evaluate(&Image::open(p).unwrap()).unwrap())
+        .map(|p| metric.evaluate(&Image::open(p).unwrap(), &()).unwrap())
         .collect();
     let weights = GuidedWeights::new(
         stack.frames.clone(),
@@ -206,7 +206,7 @@ fn how_much_detail_does_the_warp_itself_cost() {
         GuideSpace::Perceptual,
         &out,
     )
-    .weights(&focus_maps)
+    .weights(&focus_maps, &())
     .unwrap();
     let images: Vec<Image> = stack
         .frames
@@ -216,7 +216,7 @@ fn how_much_detail_does_the_warp_itself_cost() {
 
     let path = out.join("identity_select.tif");
     let fused = SelectionFusion::new(&path, by_path, 32, 2)
-        .fuse(&images, &weights)
+        .fuse(&images, &weights, &())
         .unwrap();
     let energy = laplacian_energy(&Grid::from_image(&fused, 0).unwrap());
 
@@ -237,7 +237,7 @@ fn how_much_detail_does_the_warp_itself_cost() {
     if let Ok(registered) = Image::open(&registered) {
         let truth_image = Image::open(&stack_dir().join("ground_truth_all_in_focus.tiff")).unwrap();
         let t = stackaroni_core::registration::PhaseCorrelation::new(1)
-            .align(&truth_image, &registered)
+            .align(&truth_image, &registered, &())
             .unwrap();
         let (cx, cy) = (truth.width as f32 / 2.0, truth.height as f32 / 2.0);
         println!(

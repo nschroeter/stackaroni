@@ -283,7 +283,7 @@ fn pmax_versus_ours_is_a_similarity_not_an_identity() {
         return;
     };
 
-    let t = PhaseCorrelation::new(3).align(&theirs, &ours).unwrap();
+    let t = PhaseCorrelation::new(3).align(&theirs, &ours, &()).unwrap();
     let info = ours.info();
     let (cx, cy) = (info.width as f32 / 2.0, info.height as f32 / 2.0);
     let corner = (cx * cx + cy * cy).sqrt();

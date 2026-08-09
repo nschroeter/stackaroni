@@ -13,10 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::filter::{box_mean, mul};
 use crate::image::{FrameInfo, ScratchPlane, linear_to_srgb};
-use crate::pipeline::{FocusMap, Image, Transform, WeightEstimator, WeightMaps};
+use crate::pipeline::{FocusMap, Image, RunControl, Stage, Transform, WeightEstimator, WeightMaps};
 
 /// Rec. 709 luma coefficients, applied to linear-light RGB.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
@@ -90,12 +90,17 @@ impl GuidedWeights {
 
     /// Per-pixel index of the sharpest frame, as a plane so it can be dumped for
     /// debugging and re-read band by band without rescanning every focus map.
-    pub fn labels(&self, focus_maps: &[FocusMap]) -> Result<ScratchPlane> {
+    pub fn labels(&self, focus_maps: &[FocusMap], run: &dyn RunControl) -> Result<ScratchPlane> {
         let (width, height) = (focus_maps[0].width(), focus_maps[0].height());
         let mut labels = ScratchPlane::create(&self.scratch.join("labels.f32"), width, height)?;
 
         let mut y0 = 0;
         while y0 < height {
+            // Per band rather than per frame: this loop is banded over rows with every
+            // frame read inside each band, so the band is the only unit available.
+            if run.cancelled() {
+                return Err(Error::Cancelled);
+            }
             let rows = BAND_ROWS.min(height - y0);
             let len = rows as usize * width as usize;
             let mut best = vec![f32::NEG_INFINITY; len];
@@ -200,23 +205,30 @@ impl GuidedWeights {
 }
 
 impl WeightEstimator for GuidedWeights {
-    fn weights(&self, focus_maps: &[FocusMap]) -> Result<WeightMaps> {
+    fn weights(&self, focus_maps: &[FocusMap], run: &dyn RunControl) -> Result<WeightMaps> {
         assert_eq!(
             focus_maps.len(),
             self.frames.len(),
             "one focus map per frame required"
         );
-        let labels = self.labels(focus_maps)?;
+        // Three checkpoints, not one: `labels` and `normalize` are full banded passes
+        // over every frame's plane, before and after the per-frame loop, so a check
+        // placed only in the loop would leave both ends unstoppable.
+        let labels = self.labels(focus_maps, run)?;
 
         let mut planes = Vec::with_capacity(focus_maps.len());
         for index in 0..self.frames.len() {
+            if run.cancelled() {
+                return Err(Error::Cancelled);
+            }
             let guide = self.guide(index)?;
             planes.push(self.refine(index, &labels, &guide)?);
             drop(guide);
             let _ = std::fs::remove_file(self.scratch.join(format!("guide{index}.f32")));
+            run.progress(Stage::Weights, index + 1, self.frames.len());
         }
 
-        normalize(&mut planes)?;
+        normalize(&mut planes, run)?;
         Ok(planes)
     }
 }
@@ -256,11 +268,14 @@ fn guided_filter(
 }
 
 /// Scale each pixel's weights across frames to sum to one.
-fn normalize(planes: &mut [ScratchPlane]) -> Result<()> {
+fn normalize(planes: &mut [ScratchPlane], run: &dyn RunControl) -> Result<()> {
     let (width, height) = (planes[0].width(), planes[0].height());
 
     let mut y0 = 0;
     while y0 < height {
+        if run.cancelled() {
+            return Err(Error::Cancelled);
+        }
         let rows = BAND_ROWS.min(height - y0);
         let len = rows as usize * width as usize;
 

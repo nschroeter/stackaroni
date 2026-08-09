@@ -63,7 +63,7 @@ fn fuse_synthetic_stack_against_ground_truth() {
     let focus_maps: Vec<FocusMap> = stack
         .frames
         .iter()
-        .map(|p| metric.evaluate(&Image::open(p).unwrap()).unwrap())
+        .map(|p| metric.evaluate(&Image::open(p).unwrap(), &()).unwrap())
         .collect();
 
     let estimator = GuidedWeights::new(
@@ -74,7 +74,7 @@ fn fuse_synthetic_stack_against_ground_truth() {
         GuideSpace::Perceptual,
         &scratch,
     );
-    let weights = estimator.weights(&focus_maps).unwrap();
+    let weights = estimator.weights(&focus_maps, &()).unwrap();
 
     let images: Vec<Image> = stack
         .frames
@@ -83,7 +83,7 @@ fn fuse_synthetic_stack_against_ground_truth() {
         .collect();
     let fused_path = out.join("fused.tif");
     let fusion = LaplacianPyramidFusion::new(&fused_path, by_path, PYRAMID_FLOOR);
-    let fused = fusion.fuse(&images, &weights).unwrap();
+    let fused = fusion.fuse(&images, &weights, &()).unwrap();
 
     println!(
         "\nfused {} frames in {:.1}s",

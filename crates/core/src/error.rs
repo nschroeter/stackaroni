@@ -73,6 +73,16 @@ pub enum Error {
         source: std::io::Error,
     },
 
+    /// The caller asked the run to stop.
+    ///
+    /// Deliberately an error rather than an `Ok` variant: it has to unwind out of a
+    /// loop nested several stages deep, and every call site already handles `?`. It is
+    /// the one variant that is not a fault — callers should treat it as "nothing to
+    /// report and nothing to inspect", and in particular should *not* keep the scratch
+    /// directory the way they do for a genuine failure.
+    #[error("cancelled")]
+    Cancelled,
+
     /// A band request fell outside the image.
     #[error("rows {start}..{end} out of bounds for height {height}")]
     Bounds { start: u64, end: u64, height: u32 },

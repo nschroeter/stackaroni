@@ -63,12 +63,7 @@ fn fuse_every_stack() {
         let t0 = Instant::now();
         let registration: Box<dyn Registration> =
             Box::new(PhaseCorrelation::new(REGISTRATION_LEVEL));
-        let transforms = register_stack(registration.as_ref(), &stack.frames, |done, total| {
-            if done % 20 == 0 || done == total {
-                println!("  register {done}/{total}");
-            }
-        })
-        .unwrap();
+        let transforms = register_stack(registration.as_ref(), &stack.frames, &()).unwrap();
         let span = transforms.iter().fold((f32::MAX, f32::MIN), |(lo, hi), t| {
             (lo.min(t.scale), hi.max(t.scale))
         });
@@ -91,7 +86,7 @@ fn fuse_every_stack() {
         let focus_maps: Vec<FocusMap> = stack
             .frames
             .iter()
-            .map(|p| metric.evaluate(&Image::open(p).unwrap()).unwrap())
+            .map(|p| metric.evaluate(&Image::open(p).unwrap(), &()).unwrap())
             .collect();
         println!("  focus maps in {:.0}s", t0.elapsed().as_secs_f32());
 
@@ -104,7 +99,7 @@ fn fuse_every_stack() {
             GuideSpace::Perceptual,
             &scratch,
         );
-        let weights = estimator.weights(&focus_maps).unwrap();
+        let weights = estimator.weights(&focus_maps, &()).unwrap();
         println!("  weights in {:.0}s", t0.elapsed().as_secs_f32());
 
         let t0 = Instant::now();
@@ -115,7 +110,7 @@ fn fuse_every_stack() {
             .collect();
         let output = stack.dir.join("stackaroni_fused.tif");
         let fusion = LaplacianPyramidFusion::new(&output, by_path, PYRAMID_FLOOR);
-        fusion.fuse(&images, &weights).unwrap();
+        fusion.fuse(&images, &weights, &()).unwrap();
         println!("  fused in {:.0}s", t0.elapsed().as_secs_f32());
 
         drop(weights);

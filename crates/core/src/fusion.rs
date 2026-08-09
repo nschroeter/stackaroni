@@ -18,10 +18,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::filter::box_sum;
 use crate::image::{FrameInfo, ScratchPlane};
-use crate::pipeline::{Image, ImageFusion, Transform, WeightMaps};
+use crate::pipeline::{Image, ImageFusion, RunControl, Stage, Transform, WeightMaps};
 use crate::tiff_io::write_rgb16_srgb;
 
 /// Burt & Adelson's binomial kernel, the separable `a=0.4` case of their generating
@@ -234,7 +234,7 @@ impl LaplacianPyramidFusion {
 }
 
 impl ImageFusion for LaplacianPyramidFusion {
-    fn fuse(&self, images: &[Image], weights: &WeightMaps) -> Result<Image> {
+    fn fuse(&self, images: &[Image], weights: &WeightMaps, run: &dyn RunControl) -> Result<Image> {
         assert_eq!(
             images.len(),
             weights.len(),
@@ -249,7 +249,14 @@ impl ImageFusion for LaplacianPyramidFusion {
             gaussian_pyramid(&seed, levels)
         };
 
-        for (image, weight) in images.iter().zip(weights) {
+        // Per frame. This is the stage that makes cancellation worth having: ~6.2 s a
+        // frame and ~10 minutes total on a 100-frame stack, against ~1.3 s a frame
+        // everywhere else. Sub-frame checks were considered and deliberately left out —
+        // see the run-control design notes in `CLAUDE.md`.
+        for (index, (image, weight)) in images.iter().zip(weights).enumerate() {
+            if run.cancelled() {
+                return Err(Error::Cancelled);
+            }
             let transform = self
                 .transforms
                 .get(image.path())
@@ -278,6 +285,7 @@ impl ImageFusion for LaplacianPyramidFusion {
                     }
                 }
             }
+            run.progress(Stage::Fuse, index + 1, images.len());
         }
 
         let fused = reconstruct(&accumulator);
@@ -336,7 +344,7 @@ impl SelectionFusion {
 }
 
 impl ImageFusion for SelectionFusion {
-    fn fuse(&self, images: &[Image], weights: &WeightMaps) -> Result<Image> {
+    fn fuse(&self, images: &[Image], weights: &WeightMaps, run: &dyn RunControl) -> Result<Image> {
         assert_eq!(
             images.len(),
             weights.len(),
@@ -356,7 +364,14 @@ impl ImageFusion for SelectionFusion {
             .map(|b| vec![-1.0f32; (b.width as usize) * (b.height as usize)])
             .collect();
 
-        for (image, weight) in images.iter().zip(weights) {
+        // Per frame. This is the stage that makes cancellation worth having: ~6.2 s a
+        // frame and ~10 minutes total on a 100-frame stack, against ~1.3 s a frame
+        // everywhere else. Sub-frame checks were considered and deliberately left out —
+        // see the run-control design notes in `CLAUDE.md`.
+        for (index, (image, weight)) in images.iter().zip(weights).enumerate() {
+            if run.cancelled() {
+                return Err(Error::Cancelled);
+            }
             let transform = self
                 .transforms
                 .get(image.path())
@@ -388,6 +403,7 @@ impl ImageFusion for SelectionFusion {
                     dst.data[i * 3 + ch] += w.data[i] * src.data[i * 3 + ch];
                 }
             }
+            run.progress(Stage::Fuse, index + 1, images.len());
         }
 
         let fused = reconstruct(&result);

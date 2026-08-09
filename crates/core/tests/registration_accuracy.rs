@@ -296,7 +296,7 @@ fn write_focus_heatmaps() {
             std::collections::HashMap::new(),
         );
         let map = metric
-            .evaluate(&Image::open(&stack.frames[index]).unwrap())
+            .evaluate(&Image::open(&stack.frames[index]).unwrap(), &())
             .unwrap();
         stackaroni_core::debug::write_plane(&out.join(format!("focus_{:03}.png", index + 1)), &map)
             .unwrap();
@@ -319,7 +319,7 @@ fn focus_metric_cost_on_a_real_frame() {
         stackaroni_core::focus::WindowedLaplacian::new(4, &out, std::collections::HashMap::new());
 
     let start = Instant::now();
-    let map = metric.evaluate(&image).unwrap();
+    let map = metric.evaluate(&image, &()).unwrap();
     let secs = start.elapsed().as_secs_f32();
     let mb = info.width as f64 * info.height as f64 * 4.0 / 1e6;
 

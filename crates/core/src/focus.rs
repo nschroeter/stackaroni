@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::filter::box_sum;
 use crate::image::{FrameInfo, ScratchPlane};
-use crate::pipeline::{FocusMap, FocusMetric, Image, Transform};
+use crate::pipeline::{FocusMap, FocusMetric, Image, RunControl, Transform};
 
 /// Rec. 709 luma coefficients, applied to linear-light RGB.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
@@ -91,7 +91,10 @@ impl FocusMetric for WindowedLaplacian {
     /// — a bias that varies frame to frame and would steer frame selection directly.
     /// Measuring first keeps the pristine samples; the map is then a smooth,
     /// slowly-varying field where interpolation is cheap and unbiased.
-    fn evaluate(&self, image: &Image) -> Result<FocusMap> {
+    /// `run` is accepted and not polled: one call is one frame, ~1.3 s, and the loop
+    /// over frames belongs to the caller, which checks between them.
+    fn evaluate(&self, image: &Image, run: &dyn RunControl) -> Result<FocusMap> {
+        let _ = run;
         let info = image.info();
         let stem = file_stem(image.path());
         let native_path = self.scratch.join(format!("{stem}.native.f32"));
@@ -193,7 +196,7 @@ mod tests {
 
     fn evaluate(path: &Path, scratch: &Path, radius: u32) -> FocusMap {
         let metric = WindowedLaplacian::new(radius, scratch, HashMap::new());
-        metric.evaluate(&Image::open(path).unwrap()).unwrap()
+        metric.evaluate(&Image::open(path).unwrap(), &()).unwrap()
     }
 
     #[test]
@@ -264,7 +267,7 @@ mod tests {
         let mut transforms = HashMap::new();
         transforms.insert(path.clone(), Transform::translation(8.0, 0.0));
         let metric = WindowedLaplacian::new(2, &shifted_dir, transforms);
-        let moved = metric.evaluate(&Image::open(&path).unwrap()).unwrap();
+        let moved = metric.evaluate(&Image::open(&path).unwrap(), &()).unwrap();
 
         let diff = peak_column(&moved) as i64 - unshifted as i64;
         assert!((diff + 8).abs() <= 1, "expected -8 px, got {diff}");

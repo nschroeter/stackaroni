@@ -45,12 +45,7 @@ fn fused_stays_within_the_warped_source_envelope() {
     }
 
     let registration = PhaseCorrelation::new(3);
-    let transforms = register_stack(&registration, &stack.frames, |d, t| {
-        if d % 25 == 0 {
-            println!("  register {d}/{t}");
-        }
-    })
-    .unwrap();
+    let transforms = register_stack(&registration, &stack.frames, &()).unwrap();
 
     let fused = Grid::from_image(&Image::open(&fused_path).unwrap(), 0).unwrap();
     let (cx, cy) = (fused.width as f32 / 2.0, fused.height as f32 / 2.0);

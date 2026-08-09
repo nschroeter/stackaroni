@@ -127,7 +127,7 @@ fn guide_space_comparison() {
     let focus_maps: Vec<FocusMap> = stack
         .frames
         .iter()
-        .map(|p| metric.evaluate(&Image::open(p).unwrap()).unwrap())
+        .map(|p| metric.evaluate(&Image::open(p).unwrap(), &()).unwrap())
         .collect();
 
     let transforms = vec![Transform::IDENTITY; stack.frames.len()];
@@ -145,7 +145,7 @@ fn guide_space_comparison() {
         GuideSpace::Perceptual,
         &scratch,
     );
-    let labels = estimator.labels(&focus_maps).unwrap();
+    let labels = estimator.labels(&focus_maps, &()).unwrap();
     debug::write_plane(&out.join("labels_argmax.png"), &labels).unwrap();
 
     let onehot = one_hot_weights(&labels, stack.frames.len(), &scratch);
@@ -182,7 +182,7 @@ fn guide_space_comparison() {
                 space,
                 &scratch,
             );
-            let weights = estimator.weights(&focus_maps).unwrap();
+            let weights = estimator.weights(&focus_maps, &()).unwrap();
             let blended = blend_luma(&stack.frames, &weights, width, height);
             let (all, edges) = scores(&truth, &blended, 0.02);
             println!("{name:>12}  {epsilon:>9.0e}  {all:>12.5}  {edges:>18.5}");

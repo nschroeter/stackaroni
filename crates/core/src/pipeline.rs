@@ -127,24 +127,81 @@ impl Image {
     }
 }
 
+/// Which stage is reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Register,
+    Focus,
+    Weights,
+    Fuse,
+}
+
+impl Stage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Register => "register",
+            Self::Focus => "focus",
+            Self::Weights => "weights",
+            Self::Fuse => "fuse",
+        }
+    }
+}
+
+/// A caller's handle on a running pipeline: whether to keep going, and how far it got.
+///
+/// Both halves live on one trait because they need the same checkpoints — a stage that
+/// can report "frame 47 of 100" is exactly a stage that can be stopped at frame 47.
+/// Splitting them would mean threading two parameters through the same loops.
+///
+/// Defined here rather than in `cli` or `app` because `core` cannot depend on either,
+/// and stages are where the checks have to happen: a full run is ~20 minutes on a
+/// 100-frame stack, of which fusion alone is ~10, so a caller that only checks between
+/// stages cannot stop anything.
+///
+/// Both methods default to doing nothing, so `()` is a complete implementation for
+/// callers that neither cancel nor report.
+pub trait RunControl: Sync {
+    /// Polled at each stage's checkpoints. Returning `true` aborts with
+    /// [`crate::error::Error::Cancelled`].
+    fn cancelled(&self) -> bool {
+        false
+    }
+
+    /// `done` of `total` units finished in `stage`. Units are frames everywhere.
+    fn progress(&self, stage: Stage, done: usize, total: usize) {
+        let _ = (stage, done, total);
+    }
+}
+
+/// The do-nothing control, for callers that never cancel.
+impl RunControl for () {}
+
 // Every stage below touches the disk — frames are read a band at a time and stage
 // outputs are mmapped scratch planes — so all four return `Result`, unlike the
 // original sketch in `docs/algorithms.md` §14. A mid-run failure on frame 47 of 100
 // has to name the frame, not abort the process.
+//
+// Each also takes `&dyn RunControl`. Two of the four implementations do not poll it
+// today — `align` and `evaluate` each handle a single frame, so their loops live in
+// the caller — but the parameter is on all four deliberately. These traits are a
+// stable, multiply-implemented surface, and the next planned registration (ECC affine,
+// `docs/algorithms.md` §10) iterates to convergence *inside* `align`. Adding the
+// parameter then would be a breaking change; leaving it off now would mean an
+// implementer has nothing telling them cancellation is expected.
 
 /// Estimate the geometric correction aligning `target` onto `reference`.
 pub trait Registration {
-    fn align(&self, reference: &Image, target: &Image) -> Result<Transform>;
+    fn align(&self, reference: &Image, target: &Image, run: &dyn RunControl) -> Result<Transform>;
 }
 
 /// Measure per-pixel focus quality across one frame.
 pub trait FocusMetric {
-    fn evaluate(&self, image: &Image) -> Result<FocusMap>;
+    fn evaluate(&self, image: &Image, run: &dyn RunControl) -> Result<FocusMap>;
 }
 
 /// Turn per-frame focus maps into per-frame blending weights.
 pub trait WeightEstimator {
-    fn weights(&self, focus_maps: &[FocusMap]) -> Result<WeightMaps>;
+    fn weights(&self, focus_maps: &[FocusMap], run: &dyn RunControl) -> Result<WeightMaps>;
 }
 
 /// Blend the frames together under the given weights.
@@ -153,7 +210,7 @@ pub trait WeightEstimator {
 /// through this method, the same constructor-injection pattern the guided-filter
 /// weight estimator uses for its guide images.
 pub trait ImageFusion {
-    fn fuse(&self, images: &[Image], weights: &WeightMaps) -> Result<Image>;
+    fn fuse(&self, images: &[Image], weights: &WeightMaps, run: &dyn RunControl) -> Result<Image>;
 }
 
 #[cfg(test)]
