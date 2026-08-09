@@ -172,14 +172,24 @@ impl App {
                     ui.label(egui::RichText::new(error).color(ui.visuals().error_fg_color));
                 }
                 (None, Some(stack)) => {
+                    let included = stack::included_count(&stack.frames);
+                    let total = stack.frames.len();
                     ui.label(egui::RichText::new(&stack.name).strong());
+
+                    // Highlighted once anything is excluded: the count is the difference
+                    // between what is on screen and what a run would actually use, and
+                    // that is worth noticing before pressing Run.
+                    let count = egui::RichText::new(format!("{included}/{total} included"));
+                    ui.label(if included == total {
+                        count.weak()
+                    } else {
+                        count.strong()
+                    });
+
                     ui.label(
                         egui::RichText::new(format!(
-                            "{} frames · {}x{} · {}-bit",
-                            stack.frames.len(),
-                            stack.info.width,
-                            stack.info.height,
-                            stack.info.bits_per_sample,
+                            "· {}x{} · {}-bit",
+                            stack.info.width, stack.info.height, stack.info.bits_per_sample,
                         ))
                         .weak(),
                     );
@@ -251,13 +261,23 @@ impl App {
             .show_rows(ui, row_height, stack.frames.len(), |ui, range| {
                 for index in range {
                     let frame = &stack.frames[index];
+                    let included = frame.included;
                     let response = plate(ui, index == self.selected, |ui, rect| {
                         match &frame.thumbnail {
                             Thumbnail::Ready(texture) => {
                                 // Letterboxed: frames are 3:2 and the plate is not, so
                                 // filling it would crop or distort.
                                 let size = fit(texture.size_vec2(), rect.size());
-                                egui::Image::new(texture).corner_radius(2.0).paint_at(
+                                let image = egui::Image::new(texture).corner_radius(2.0);
+                                // Dimmed, not hidden: an excluded frame stays
+                                // recognizable so the decision can be reversed by
+                                // looking rather than by remembering.
+                                let image = if included {
+                                    image
+                                } else {
+                                    image.tint(egui::Color32::from_white_alpha(60))
+                                };
+                                image.paint_at(
                                     ui,
                                     egui::Rect::from_center_size(rect.center(), size),
                                 );
@@ -271,24 +291,28 @@ impl App {
                         }
                     });
 
-                    let response = match &frame.thumbnail {
-                        Thumbnail::Failed(error) => response.on_hover_text(error),
-                        _ => response.on_hover_text(
-                            frame
-                                .path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
-                        ),
+                    let name = frame
+                        .path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let hint = match &frame.thumbnail {
+                        Thumbnail::Failed(error) => error.clone(),
+                        _ if included => format!("{name}\nclick to exclude"),
+                        _ => format!("{name}\nexcluded — click to include"),
                     };
-                    if response.clicked() {
+                    if response.on_hover_text(hint).clicked() {
                         clicked = Some(index);
                     }
                     ui.add_space(4.0);
                 }
             });
 
+        // Applied after the loop because the closure borrows the stack immutably.
         if let Some(index) = clicked {
+            if let Some(stack) = &mut self.stack {
+                stack.frames[index].included = !stack.frames[index].included;
+            }
             self.selected = index;
         }
     }

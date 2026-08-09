@@ -46,6 +46,14 @@ pub enum Thumbnail {
 pub struct Frame {
     pub path: PathBuf,
     pub thumbnail: Thumbnail,
+    /// Whether this frame takes part in a run. Excluded frames stay loaded and visible —
+    /// exclusion is a decision to revisit, not a reason to forget the frame.
+    pub included: bool,
+}
+
+/// How many frames a run would actually use.
+pub fn included_count(frames: &[Frame]) -> usize {
+    frames.iter().filter(|f| f.included).count()
 }
 
 /// A loaded stack: frame list and geometry, with thumbnails arriving over time.
@@ -98,6 +106,7 @@ impl Stack {
                 .map(|path| Frame {
                     path,
                     thumbnail: Thumbnail::Pending,
+                    included: true,
                 })
                 .collect(),
             decoded: 0,
@@ -245,6 +254,38 @@ mod tests {
         .unwrap();
     }
 
+    fn frames(included: [bool; 4]) -> Vec<Frame> {
+        included
+            .into_iter()
+            .map(|included| Frame {
+                path: PathBuf::from("f.tif"),
+                thumbnail: Thumbnail::Pending,
+                included,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn included_count_reflects_exclusions() {
+        // The number the toolbar shows before a run. Getting it wrong in the safe
+        // direction would still be wrong: it is the only signal that the run will not
+        // use every frame on screen.
+        assert_eq!(included_count(&frames([true; 4])), 4);
+        assert_eq!(included_count(&frames([true, false, true, false])), 2);
+        assert_eq!(included_count(&frames([false; 4])), 0);
+    }
+
+    #[test]
+    fn frames_start_included() {
+        // A freshly opened folder must be ready to run without clicking 100 thumbnails.
+        let dir = tempfile::tempdir().unwrap();
+        write_flat(&dir.path().join("a.tif"), 32, 16, [0.5; 3]);
+        write_flat(&dir.path().join("b.tif"), 32, 16, [0.5; 3]);
+
+        let stack = Stack::load(dir.path(), Arc::new(AtomicU64::new(0))).unwrap();
+        assert_eq!(included_count(&stack.frames), stack.frames.len());
+    }
+
     #[test]
     fn thumbnail_downsamples_and_keeps_the_aspect_ratio() {
         let dir = tempfile::tempdir().unwrap();
@@ -277,6 +318,78 @@ mod tests {
                 "got {got}, want ~{want} for linear {linear}"
             );
         }
+    }
+
+    /// How much of a real 50 MP frame does a thumbnail actually read?
+    ///
+    /// ```text
+    /// cargo test --release -p stackaroni-app -- --ignored --nocapture
+    /// ```
+    ///
+    /// The claim being checked is that thumbnailing is far cheaper than decoding the
+    /// frame, not merely that it happens off the UI thread. Both matter and they are
+    /// independent: a worker thread that fully decoded every frame would still take
+    /// minutes to fill the filmstrip and would still be wrong.
+    #[test]
+    #[ignore = "requires test-data/, run with --release"]
+    fn thumbnail_reads_a_small_fraction_of_a_real_frame() {
+        use std::time::Instant;
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/blossom");
+        let Ok(stack) = discover_stack(&dir) else {
+            eprintln!("skipping: test-data/blossom not present");
+            return;
+        };
+        let path = &stack.frames[0];
+
+        let started = Instant::now();
+        let thumb = thumbnail(path).unwrap();
+        let thumbnail_time = started.elapsed();
+
+        // The control: decode every row of the same frame, which is what a naive
+        // implementation would do before scaling down.
+        let image = Image::open(path).unwrap();
+        let info = image.info();
+        let started = Instant::now();
+        let mut band = vec![0f32; info.row_len() * 64];
+        let mut y = 0;
+        while y < info.height {
+            let count = 64.min(info.height - y);
+            image
+                .read_rows(y, count, &mut band[..info.row_len() * count as usize])
+                .unwrap();
+            y += count;
+        }
+        let full_time = started.elapsed();
+
+        println!("\n=== thumbnail cost, {}x{} ===", info.width, info.height);
+        println!("thumbnail {:?} -> {:?}", thumbnail_time, thumb.size);
+        println!("full decode {full_time:?}");
+        println!(
+            "thumbnail is {:.1}x cheaper",
+            full_time.as_secs_f64() / thumbnail_time.as_secs_f64()
+        );
+
+        assert!(
+            thumbnail_time < full_time,
+            "thumbnailing must not cost a full decode: {thumbnail_time:?} vs {full_time:?}"
+        );
+
+        // The other half of "does not block the UI": discovery and probing *are*
+        // synchronous, so they are the click-to-response latency of "Open folder…".
+        // Header reads only, but there is one per frame, so it is worth a number
+        // rather than an assumption.
+        let started = Instant::now();
+        let probed = discover_stack(&dir).unwrap().probe().unwrap();
+        let probe_time = started.elapsed();
+        println!(
+            "\nsynchronous on click: discover + probe {} frames in {probe_time:?}",
+            probed.frames.len()
+        );
+        println!(
+            "background: ~{:?} for the whole filmstrip",
+            thumbnail_time * probed.frames.len() as u32
+        );
     }
 
     #[test]
