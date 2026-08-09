@@ -12,7 +12,12 @@ use crate::tiff_io::probe;
 /// 50 frames; without this it would be stacked as a 51st frame.
 /// `stackaroni_fused` is our own output: writing a result next to the frames it was
 /// made from would otherwise feed it back in as an extra frame on the next run.
-const NON_FRAME_STEMS: &[&str] = &["ground_truth_all_in_focus", "depth_map", "stackaroni_fused"];
+const NON_FRAME_STEMS: &[&str] = &[
+    "ground_truth_all_in_focus",
+    "depth_map",
+    "stackaroni_fused",
+    "reference_pmax",
+];
 
 /// A directory of frames, in stacking order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,6 +179,10 @@ mod tests {
             "README.md",
             ".DS_Store",
             "._frame_001.tiff",
+            // Our own output and a third-party reference render, both of which
+            // legitimately live beside the frames they were made from.
+            "stackaroni_fused.tif",
+            "reference_pmax.tif",
         ] {
             touch(dir.path(), name);
         }
