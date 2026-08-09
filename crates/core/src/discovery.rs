@@ -10,7 +10,9 @@ use crate::tiff_io::probe;
 ///
 /// `test-data/synthetic_50/` ships its ground truth in the same directory as the
 /// 50 frames; without this it would be stacked as a 51st frame.
-const NON_FRAME_STEMS: &[&str] = &["ground_truth_all_in_focus", "depth_map"];
+/// `stackaroni_fused` is our own output: writing a result next to the frames it was
+/// made from would otherwise feed it back in as an extra frame on the next run.
+const NON_FRAME_STEMS: &[&str] = &["ground_truth_all_in_focus", "depth_map", "stackaroni_fused"];
 
 /// A directory of frames, in stacking order.
 #[derive(Debug, Clone, PartialEq, Eq)]
