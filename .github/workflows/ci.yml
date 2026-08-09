@@ -15,7 +15,7 @@ jobs:
     name: cargo test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -61,7 +61,7 @@ jobs:
             binary: stackaroni-app
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -104,7 +104,11 @@ jobs:
             *) echo "::error::expected an arm64 binary, got '$archs'"; exit 1 ;;
           esac
 
-      - uses: actions/upload-artifact@v4
+      # v6, not v5: upload-artifact v5 still declares `using: node20` and only had
+      # preliminary Node 24 support, so bumping both actions to v5 would silence the
+      # deprecation warning for checkout and leave it in place for this one. checkout
+      # switched at v5, upload-artifact at v6 — the majors are not in step.
+      - uses: actions/upload-artifact@v6
         with:
           name: stackaroni-app-${{ matrix.name }}
           path: target/release/${{ matrix.binary }}
