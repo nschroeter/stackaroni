@@ -1,3 +1,8 @@
-test-data
+# The stacks themselves are hundreds of MB and stay out; the README describing
+# them is project documentation and CLAUDE.md points at it, so it is tracked.
+# Note the form: `test-data/*` rather than `test-data`, because git will not
+# descend into an excluded directory and a negation could not reach inside one.
+test-data/*
+!test-data/README.md
 target
 .DS_Store
