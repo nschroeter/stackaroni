@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
+use crate::filter::box_sum;
 use crate::image::{FrameInfo, ScratchPlane};
 use crate::pipeline::{Image, ImageFusion, Transform, WeightMaps};
 use crate::tiff_io::write_rgb16_srgb;
@@ -289,6 +290,142 @@ impl ImageFusion for LaplacianPyramidFusion {
     }
 }
 
+/// Per-level selection fusion: the PMax-shaped rule from `docs/algorithms.md` §6b.
+///
+/// Burt & Kolczynski, *ICCV* 1993, 173-182. The band-pass levels take a fresh decision
+/// at every level and position from the pyramid coefficients themselves, instead of
+/// inheriting one decision taken once at a single window scale. The coarsest (base)
+/// level has no contrast to select on and keeps [`LaplacianPyramidFusion`]'s weighted
+/// blend, so the weight maps are still required.
+///
+/// # Two deliberate deviations from the paper, both recorded here rather than silently
+///
+/// **The match/average branch is omitted.** B&K select where the sources disagree and
+/// average where they agree, which needs every source's coefficients at a level
+/// simultaneously — 100 frames of full-resolution pyramid, far past any memory budget
+/// this pipeline can hold. Selection alone streams: one running best-salience plane per
+/// level, frames folded in one at a time, the frame count out of the budget exactly as
+/// in [`LaplacianPyramidFusion`]. If selection alone shows switching artifacts in
+/// smoothly varying regions, that is the evidence that the match term is worth the
+/// memory, and the place to look is background bokeh.
+///
+/// **Salience is joint across channels, not per channel.** Selecting a different frame
+/// for red than for green at the same position would read as colour fringing on exactly
+/// the high-contrast edges this rule exists to improve.
+pub struct SelectionFusion {
+    output: PathBuf,
+    transforms: HashMap<PathBuf, Transform>,
+    floor: u32,
+    salience_radius: u32,
+}
+
+impl SelectionFusion {
+    pub fn new(
+        output: &Path,
+        transforms: HashMap<PathBuf, Transform>,
+        floor: u32,
+        salience_radius: u32,
+    ) -> Self {
+        Self {
+            output: output.to_path_buf(),
+            transforms,
+            floor,
+            salience_radius,
+        }
+    }
+}
+
+impl ImageFusion for SelectionFusion {
+    fn fuse(&self, images: &[Image], weights: &WeightMaps) -> Result<Image> {
+        assert_eq!(
+            images.len(),
+            weights.len(),
+            "one weight plane per image required"
+        );
+        let info = images[0].info();
+        let levels = level_count(info.width, info.height, self.floor);
+
+        let mut result: Vec<Bitmap> = {
+            let seed = Bitmap::new(info.width, info.height, 3);
+            gaussian_pyramid(&seed, levels)
+        };
+        // Running best windowed salience per band-pass level. Negative so that the
+        // first frame wins everywhere regardless of how flat it is.
+        let mut best: Vec<Vec<f32>> = result[..levels - 1]
+            .iter()
+            .map(|b| vec![-1.0f32; (b.width as usize) * (b.height as usize)])
+            .collect();
+
+        for (image, weight) in images.iter().zip(weights) {
+            let transform = self
+                .transforms
+                .get(image.path())
+                .copied()
+                .unwrap_or(Transform::IDENTITY);
+
+            let warped = warp_frame(image, transform, info)?;
+            let bands = laplacian_pyramid(&warped, levels);
+            drop(warped);
+
+            for level in 0..levels - 1 {
+                select_more_salient(
+                    &mut result[level],
+                    &mut best[level],
+                    &bands[level],
+                    self.salience_radius,
+                );
+            }
+
+            // Base level: the weight map reduced all the way down, blended as before.
+            // Only the coarsest level is needed, so the intermediate levels are not kept.
+            let mut w = plane_to_bitmap(weight)?;
+            for _ in 1..levels {
+                w = reduce(&w);
+            }
+            let (dst, src) = (&mut result[levels - 1], &bands[levels - 1]);
+            for i in 0..w.data.len() {
+                for ch in 0..3 {
+                    dst.data[i * 3 + ch] += w.data[i] * src.data[i * 3 + ch];
+                }
+            }
+        }
+
+        let fused = reconstruct(&result);
+        write_rgb16_srgb(&self.output, info, |y, row| {
+            let start = y as usize * info.width as usize * 3;
+            row.copy_from_slice(&fused.data[start..start + row.len()]);
+            Ok(())
+        })?;
+        Image::open(&self.output)
+    }
+}
+
+/// Overwrite `dst` wherever `src` carries more windowed salience, updating `best`.
+///
+/// Salience is local energy — the sum of squared coefficients over a
+/// `(2*radius+1)` square window — not the coefficient magnitude at the pixel itself.
+/// The distinction is the whole point: per-pixel argmax over Laplacian coefficients
+/// draws neighbouring pixels from inconsistent sources and, on ISO-1600 frames, would
+/// routinely select noise (Wang et al., *PLOS ONE* 13(5), 2018, e0191085). The window
+/// makes an isolated spike lose to genuine surrounding structure.
+fn select_more_salient(dst: &mut Bitmap, best: &mut [f32], src: &Bitmap, radius: u32) {
+    let n = best.len();
+    let energy: Vec<f32> = (0..n)
+        .map(|i| {
+            let p = &src.data[i * 3..i * 3 + 3];
+            p[0] * p[0] + p[1] * p[1] + p[2] * p[2]
+        })
+        .collect();
+    let salience = box_sum(&energy, src.width, src.height, radius);
+
+    for i in 0..n {
+        if salience[i] > best[i] {
+            best[i] = salience[i];
+            dst.data[i * 3..i * 3 + 3].copy_from_slice(&src.data[i * 3..i * 3 + 3]);
+        }
+    }
+}
+
 fn plane_to_bitmap(plane: &ScratchPlane) -> Result<Bitmap> {
     let mut out = Bitmap::new(plane.width(), plane.height(), 1);
     out.data.copy_from_slice(plane.rows(0, plane.height())?);
@@ -356,6 +493,8 @@ fn warp_frame(image: &Image, transform: Transform, info: FrameInfo) -> Result<Bi
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Range;
+
     use super::*;
 
     fn textured(width: u32, height: u32, channels: usize) -> Bitmap {
@@ -449,5 +588,131 @@ mod tests {
             .map(|(x, y)| (x - y).abs())
             .fold(0.0f32, f32::max);
         assert!(worst < 1e-4, "should return frame a unchanged: {worst}");
+    }
+
+    /// A band with checkerboard detail in one half and nothing in the other.
+    fn detail_in(half: Range<u32>, width: u32, height: u32) -> Bitmap {
+        let mut b = Bitmap::new(width, height, 3);
+        for y in 0..height {
+            for x in half.clone() {
+                let i = b.index(x, y);
+                let v = if (x + y) % 2 == 0 { 0.5 } else { -0.5 };
+                b.data[i..i + 3].fill(v);
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn selection_takes_the_more_salient_source_at_each_position() {
+        let (w, h) = (32u32, 16u32);
+        let left = detail_in(0..16, w, h);
+        let right = detail_in(16..32, w, h);
+
+        let mut dst = Bitmap::new(w, h, 3);
+        let mut best = vec![-1.0f32; (w * h) as usize];
+        select_more_salient(&mut dst, &mut best, &left, 1);
+        select_more_salient(&mut dst, &mut best, &right, 1);
+
+        // Away from the seam, each half must come from whichever source has the
+        // detail there — not from an average of the two, which would halve it.
+        for y in 2..h - 2 {
+            for x in [4u32, 27] {
+                let i = dst.index(x, y);
+                let want = if x < 16 { &left } else { &right };
+                assert_eq!(dst.data[i], want.data[i], "at ({x},{y})");
+                assert_eq!(dst.data[i].abs(), 0.5, "at ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn selection_is_joint_across_channels_never_per_channel() {
+        // Load-bearing for colour, not a style preference. If R could come from one
+        // frame while G and B came from another, each frame's independent colour noise
+        // would combine into drift that no single source has — manufactured chroma
+        // noise. Sources are built so the per-channel winner differs from the joint
+        // winner: `blue` has the larger coefficient in one channel, `broad` the larger
+        // total. Joint selection must take `broad` whole.
+        let (w, h) = (16u32, 16u32);
+        let mut broad = Bitmap::new(w, h, 3);
+        let mut blue = Bitmap::new(w, h, 3);
+        for i in 0..(w * h) as usize {
+            broad.data[i * 3..i * 3 + 3].copy_from_slice(&[0.4, 0.4, 0.4]);
+            blue.data[i * 3..i * 3 + 3].copy_from_slice(&[0.0, 0.0, 0.6]);
+        }
+
+        let mut dst = Bitmap::new(w, h, 3);
+        let mut best = vec![-1.0f32; (w * h) as usize];
+        select_more_salient(&mut dst, &mut best, &blue, 1);
+        select_more_salient(&mut dst, &mut best, &broad, 1);
+
+        // 0.48 total beats 0.36, so `broad` wins — and wins in *every* channel,
+        // including blue where it is individually the weaker source.
+        for i in 0..(w * h) as usize {
+            assert_eq!(&dst.data[i * 3..i * 3 + 3], &[0.4, 0.4, 0.4], "at {i}");
+        }
+    }
+
+    #[test]
+    fn the_salience_window_loses_to_structure_against_an_isolated_spike() {
+        // This is the §6b rationale under test: per-pixel argmax would take the
+        // spike, because 2.0 > 0.5 at that one position.
+        let (w, h) = (32u32, 16u32);
+        let structure = detail_in(0..32, w, h);
+        let mut spike = Bitmap::new(w, h, 3);
+        let si = spike.index(10, 8);
+        spike.data[si..si + 3].fill(2.0);
+
+        let mut dst = Bitmap::new(w, h, 3);
+        let mut best = vec![-1.0f32; (w * h) as usize];
+        select_more_salient(&mut dst, &mut best, &structure, 2);
+        select_more_salient(&mut dst, &mut best, &spike, 2);
+
+        assert_eq!(
+            dst.data[si], structure.data[si],
+            "an isolated spike should lose to surrounding structure"
+        );
+    }
+
+    #[test]
+    fn selection_reconstructs_a_frame_that_dominates_every_level() {
+        // Selection is only meaningful if it is exact where it selects: a source that
+        // wins at every level and position must come back unchanged, the same
+        // guarantee `all_weight_on_one_frame_returns_that_frame` gives the blend.
+        let sharp = textured(32, 32, 3);
+        // The same texture at a tenth the contrast, so its salience is exactly 0.01x
+        // sharp's everywhere — strictly smaller wherever sharp has any, and equal only
+        // where both coefficients are zero and the choice cannot matter.
+        let mut dim = sharp.clone();
+        for v in &mut dim.data {
+            *v *= 0.1;
+        }
+        let levels = level_count(32, 32, 8);
+
+        let mut result = gaussian_pyramid(&Bitmap::new(32, 32, 3), levels);
+        let mut best: Vec<Vec<f32>> = result[..levels - 1]
+            .iter()
+            .map(|b| vec![-1.0f32; (b.width * b.height) as usize])
+            .collect();
+        for source in [&dim, &sharp] {
+            let bands = laplacian_pyramid(source, levels);
+            for level in 0..levels - 1 {
+                select_more_salient(&mut result[level], &mut best[level], &bands[level], 2);
+            }
+            // All the base-level weight on the sharp frame, as the blend would give it.
+            result[levels - 1] = bands[levels - 1].clone();
+        }
+
+        let worst = sharp
+            .data
+            .iter()
+            .zip(&reconstruct(&result).data)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1e-4,
+            "should return the sharp frame unchanged: {worst}"
+        );
     }
 }

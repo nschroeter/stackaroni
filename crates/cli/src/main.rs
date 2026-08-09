@@ -11,7 +11,7 @@ use fs4::available_space;
 use stackaroni_core::debug;
 use stackaroni_core::discovery::{Stack, discover_stack, discover_test_set};
 use stackaroni_core::focus::WindowedLaplacian;
-use stackaroni_core::fusion::LaplacianPyramidFusion;
+use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
 use stackaroni_core::grid::Grid;
 use stackaroni_core::pipeline::{
     FocusMap, FocusMetric, Image, ImageFusion, Transform, WeightEstimator,
@@ -73,9 +73,28 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = GuideSpaceArg::Perceptual)]
     guide_space: GuideSpaceArg,
 
+    /// How the pyramid levels are combined. See `docs/algorithms.md` §6b.
+    ///
+    /// Defaults to `blend`, the T8 rule, so every eval-log row recorded before
+    /// `--fusion` existed still reproduces from its commit without extra flags.
+    #[arg(long, value_enum, default_value_t = FusionArg::Blend)]
+    fusion: FusionArg,
+
+    /// Salience window radius for `--fusion select`. Ignored by `blend`.
+    #[arg(long, default_value_t = 2)]
+    salience_radius: u32,
+
     /// Report per-frame progress.
     #[arg(long, short)]
     verbose: bool,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum FusionArg {
+    /// Weighted blend of every level under the refined weight maps.
+    Blend,
+    /// Per-level selection by windowed salience; weighted blend at the base level.
+    Select,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -249,7 +268,19 @@ fn pipeline(
         .iter()
         .map(|p| Image::open(p))
         .collect::<stackaroni_core::error::Result<_>>()?;
-    let fusion = LaplacianPyramidFusion::new(output, by_path, cli.pyramid_floor);
+    let fusion: Box<dyn ImageFusion> = match cli.fusion {
+        FusionArg::Blend => Box::new(LaplacianPyramidFusion::new(
+            output,
+            by_path,
+            cli.pyramid_floor,
+        )),
+        FusionArg::Select => Box::new(SelectionFusion::new(
+            output,
+            by_path,
+            cli.pyramid_floor,
+            cli.salience_radius,
+        )),
+    };
     let fused = fusion.fuse(&images, &weights)?;
     println!("  fuse      {:>5.0}s", step.elapsed().as_secs_f32());
 

@@ -146,6 +146,32 @@ the band-pass levels the decision comes from the pyramid itself, so T6/T7 are no
 the critical path for detail — they remain relevant for the base (coarsest) band, which has
 no meaningful "contrast" to select on and still needs a weighted blend.
 
+**Known simplification: the match/average branch is not implemented.** `SelectionFusion`
+implements the selection half of the rule above and omits the `M >= threshold` branch, so it
+always selects and never averages toward the more salient source. This is a **deliberate
+consequence of the streaming architecture**, not an oversight: the match term is a
+normalized correlation *between the sources* over a window, which requires every frame's
+coefficients at a level simultaneously. Fusion instead folds frames in one at a time against
+a running best-salience plane, which is what keeps the frame count out of the memory budget
+— 100 full-resolution pyramids is not a budget that exists. Implementing the match term
+means either a bounded working set of candidate sources per level or a second pass over
+every frame, and both are real cost.
+
+Tracked the same way §10's unmodelled rotation is tracked, and for the same reason — the
+term is omitted because the data does not currently demand it, and the trigger for
+revisiting is named in advance rather than left to judgement:
+
+- **What would justify implementing it:** a stack where salience between frames is close to
+  tied over a region, so the winner flips on noise. That shows as switching artifacts —
+  patchy, blotchy background rather than the uniform grain of a single frame passed through.
+- **Where it would show first:** smoothly varying regions with no frame genuinely in focus,
+  i.e. background bokeh, which is checklist item 3.
+- **What the current evidence says:** it has not shown up. On blossom the background grain
+  is uniform, not patchy, and measures at one source frame's chroma noise rather than above
+  it — which is what rules out selection combining inconsistent sources. On synthetic_50 the
+  `bokeh` metric crosses 1.0 while the crops stay clean. So: **do not implement the match
+  term speculatively.** Wait for a stack that actually shows the instability.
+
 **References for this section**
 
 - Burt, P. J., & Kolczynski, R. J. (1993). Enhanced image capture through fusion. *ICCV*, 173-182.
