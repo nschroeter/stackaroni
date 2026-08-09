@@ -1,0 +1,111 @@
+name: CI
+
+# Push to main only. The test suite here is the fixture-free subset (see below), so
+# it says nothing about output quality — that still comes from running the CLI against
+# `test-data/` locally and rating the result, per the evaluation workflow in CLAUDE.md.
+on:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: cargo test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Plain `cargo test`, deliberately without `--ignored`.
+      #
+      # `test-data/` holds the real 16-bit TIFF stacks and is gitignored, so a CI
+      # checkout has only its README. Every test that reads a real stack is gated
+      # behind `#[ignore]` and therefore excluded here by default — the same way it
+      # is locally. Verified against a fresh clone before this workflow was added:
+      # 50 unit tests pass and 21 tests report as ignored, none of them attempting
+      # to open a fixture.
+      #
+      # If you add a test that touches `test-data/`, gate it with
+      # `#[ignore = "requires test-data/"]` or this job will start failing on a
+      # missing file rather than skipping cleanly.
+      - name: Run the workspace test suite
+        run: cargo test --workspace
+
+  build:
+    name: build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            binary: stackaroni-app
+          - name: windows-x86_64
+            runner: windows-latest
+            binary: stackaroni-app.exe
+          # Pinned rather than `macos-latest`. That label maps to macOS 26 Arm64 as of
+          # 2026-08, but GitHub has moved it across architectures before — it was Intel
+          # until the macOS 14 image — and a silent flip would ship an x86_64 binary
+          # labelled as Apple Silicon. `macos-15` is documented Arm64; the step below
+          # asserts the built binary really is arm64 so any future drift fails loudly
+          # instead of being discovered by a user.
+          - name: macos-aarch64
+            runner: macos-15
+            binary: stackaroni-app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # eframe pulls in winit and the glow renderer, which need X11/Wayland and GL
+      # headers at build time. These are absent from the Ubuntu runner image.
+      # Adding `rfd` for native file dialogs, which CLAUDE.md plans, will also need
+      # `libgtk-3-dev` here.
+      - name: Install Linux windowing dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libgl1-mesa-dev
+
+      # Native runner per OS, no cross-compilation: the windowing and GL dependencies
+      # above are platform-specific and fragile to cross-build.
+      - name: Build the app
+        run: cargo build --release -p stackaroni-app
+
+      - name: Confirm the macOS binary is Apple Silicon
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          file target/release/stackaroni-app
+          archs=$(lipo -archs target/release/stackaroni-app)
+          echo "architectures: $archs"
+          case "$archs" in
+            *arm64*) echo "arm64 confirmed" ;;
+            *) echo "::error::expected an arm64 binary, got '$archs'"; exit 1 ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stackaroni-app-${{ matrix.name }}
+          path: target/release/${{ matrix.binary }}
+          if-no-files-found: error
