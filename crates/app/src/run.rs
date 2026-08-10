@@ -42,11 +42,11 @@ use std::thread::JoinHandle;
 use eframe::egui;
 use fs4::available_space;
 use stackaroni_core::error::{Error, Result};
-use stackaroni_core::focus::WindowedLaplacian;
+use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
 use stackaroni_core::image::FrameInfo;
 use stackaroni_core::pipeline::{
-    FocusMap, FocusMetric, Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
+    Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
 };
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
@@ -251,14 +251,7 @@ fn pipeline(
         .collect();
 
     let metric = WindowedLaplacian::new(settings.focus_radius, scratch, by_path.clone());
-    let mut focus_maps: Vec<FocusMap> = Vec::with_capacity(frames.len());
-    for (i, path) in frames.iter().enumerate() {
-        if run.cancelled() {
-            return Err(Error::Cancelled);
-        }
-        focus_maps.push(metric.evaluate(&Image::open(path)?, run)?);
-        run.progress(Stage::Focus, i + 1, frames.len());
-    }
+    let focus_maps = evaluate_stack(&metric, frames, run)?;
 
     let weights = GuidedWeights::new(
         frames.to_vec(),

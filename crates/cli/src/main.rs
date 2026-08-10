@@ -10,11 +10,11 @@ use clap::{Parser, ValueEnum};
 use fs4::available_space;
 use stackaroni_core::debug;
 use stackaroni_core::discovery::{Stack, discover_stack, discover_test_set};
-use stackaroni_core::focus::WindowedLaplacian;
+use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
 use stackaroni_core::grid::Grid;
 use stackaroni_core::pipeline::{
-    FocusMap, FocusMetric, Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
+    FocusMap, Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
 };
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
@@ -230,7 +230,6 @@ fn pipeline(
     scratch: &Path,
     debug_dir: Option<&Path>,
 ) -> Result<()> {
-    let frames = stack.frames.len();
     let verbose = cli.verbose;
 
     // The CLI never cancels; `Progress` only prints. `()` would also be a complete
@@ -257,11 +256,7 @@ fn pipeline(
 
     let step = Instant::now();
     let metric = WindowedLaplacian::new(cli.focus_radius, scratch, by_path.clone());
-    let mut focus_maps: Vec<FocusMap> = Vec::with_capacity(frames);
-    for (i, path) in stack.frames.iter().enumerate() {
-        focus_maps.push(metric.evaluate(&Image::open(path)?, &run)?);
-        run.progress(Stage::Focus, i + 1, frames);
-    }
+    let focus_maps = evaluate_stack(&metric, &stack.frames, &run)?;
     println!("  focus     {:>5.0}s", step.elapsed().as_secs_f32());
 
     let step = Instant::now();

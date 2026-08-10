@@ -21,11 +21,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use stackaroni_core::discovery::discover_stack;
-use stackaroni_core::focus::WindowedLaplacian;
+use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::SelectionFusion;
-use stackaroni_core::pipeline::{
-    FocusMap, FocusMetric, Image, ImageFusion, Transform, WeightEstimator,
-};
+use stackaroni_core::pipeline::{Image, ImageFusion, Transform, WeightEstimator};
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
 
@@ -77,11 +75,7 @@ fn the_fused_output_is_byte_identical() {
         .collect();
 
     let metric = WindowedLaplacian::new(FOCUS_RADIUS, scratch.path(), by_path.clone());
-    let focus_maps: Vec<FocusMap> = stack
-        .frames
-        .iter()
-        .map(|p| metric.evaluate(&Image::open(p).unwrap(), &()).unwrap())
-        .collect();
+    let focus_maps = evaluate_stack(&metric, &stack.frames, &()).unwrap();
 
     let weights = GuidedWeights::new(
         stack.frames.clone(),

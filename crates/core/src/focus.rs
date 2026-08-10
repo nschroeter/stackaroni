@@ -12,12 +12,15 @@
 //! 46(5), 2013, 1415-1432).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::filter::box_sum;
 use crate::image::{FrameInfo, ScratchPlane};
-use crate::pipeline::{FocusMap, FocusMetric, Image, RunControl, Transform};
+use crate::pipeline::{FocusMap, FocusMetric, Image, RunControl, Stage, Transform};
 
 /// Rec. 709 luma coefficients, applied to linear-light RGB.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
@@ -79,6 +82,45 @@ impl WindowedLaplacian {
         }
         Ok(plane)
     }
+}
+
+/// Measure every frame in a stack, concurrently.
+///
+/// The per-frame loop lived in each caller — the CLI, the app, several tests — so
+/// parallelising it there would have meant doing so once per caller that remembered.
+/// It belongs beside [`crate::registration::register_stack`], which set the precedent
+/// for the same reason.
+///
+/// Frames are independent: each reads its own file and writes its own scratch plane. The
+/// returned order is the input order regardless of which thread finishes first, because
+/// everything downstream indexes focus maps by frame.
+pub fn evaluate_stack(
+    metric: &dyn FocusMetric,
+    frames: &[PathBuf],
+    run: &dyn RunControl,
+) -> Result<Vec<FocusMap>> {
+    let total = frames.len();
+    let done = AtomicUsize::new(0);
+
+    let mut indexed: Vec<(usize, FocusMap)> = frames
+        .par_iter()
+        .enumerate()
+        .map(|(index, path)| {
+            if run.cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let map = metric.evaluate(&Image::open(path)?, run)?;
+            run.progress(
+                Stage::Focus,
+                done.fetch_add(1, Ordering::Relaxed) + 1,
+                total,
+            );
+            Ok((index, map))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    indexed.sort_unstable_by_key(|(index, _)| *index);
+    Ok(indexed.into_iter().map(|(_, map)| map).collect())
 }
 
 impl FocusMetric for WindowedLaplacian {

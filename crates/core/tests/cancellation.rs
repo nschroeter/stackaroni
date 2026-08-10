@@ -178,8 +178,23 @@ fn the_blend_rule_stops_too() {
     assert_eq!(control.reports().len(), 1);
 }
 
+/// Weights honours cancellation, but *not* at an exact frame — and that is correct.
+///
+/// The per-frame loop runs across threads, so by the time the flag is set every frame
+/// still in flight finishes; on a machine with more cores than this fixture has frames,
+/// that is all of them, and the run then stops at `normalize`. Asserting "stopped after
+/// exactly three" encoded a sequential assumption and broke the moment the loop went
+/// wide.
+///
+/// What remains guaranteed, and is what this checks: the call fails with `Cancelled`
+/// rather than returning weights. An implementation that ignored the flag would return
+/// `Ok` and fail here, which is the regression worth catching.
+///
+/// Fusion is different and its tests still pin an exact frame: its per-frame loop is
+/// deliberately sequential, because float addition into the accumulator is not
+/// associative and going wide there would change the output.
 #[test]
-fn weights_stops_partway_and_reports_frames() {
+fn weights_honours_cancellation() {
     let dir = tempfile::tempdir().unwrap();
     let (paths, maps, _) = fixture(dir.path());
 
@@ -196,9 +211,18 @@ fn weights_stops_partway_and_reports_frames() {
         panic!("expected the run to be cancelled");
     };
     assert!(matches!(error, Error::Cancelled), "got {error}");
+
     let reports = control.reports();
-    assert_eq!(reports.len(), 3, "should have stopped after three frames");
-    assert_eq!(reports[2], (Stage::Weights, 3, 6));
+    assert!(
+        reports.iter().all(|(stage, ..)| *stage == Stage::Weights),
+        "weights should only report its own stage"
+    );
+    assert!(
+        !reports.is_empty() && reports.len() <= paths.len(),
+        "expected between 1 and {} reports, got {}",
+        paths.len(),
+        reports.len()
+    );
 }
 
 #[test]

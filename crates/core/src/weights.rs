@@ -12,6 +12,9 @@
 //! it to fusion weights follows Li, Kang & Hu, *IEEE TIP* 22(7), 2013, 2864-2875.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rayon::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::filter::{box_mean, mul};
@@ -216,17 +219,34 @@ impl WeightEstimator for GuidedWeights {
         // placed only in the loop would leave both ends unstoppable.
         let labels = self.labels(focus_maps, run)?;
 
-        let mut planes = Vec::with_capacity(focus_maps.len());
-        for index in 0..self.frames.len() {
-            if run.cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let guide = self.guide(index)?;
-            planes.push(self.refine(index, &labels, &guide)?);
-            drop(guide);
-            let _ = std::fs::remove_file(self.scratch.join(format!("guide{index}.f32")));
-            run.progress(Stage::Weights, index + 1, self.frames.len());
-        }
+        // Per frame and independent: each builds its own guide from its own frame and
+        // writes its own plane, so the only shared input is the read-only label field.
+        let total = self.frames.len();
+        let done = AtomicUsize::new(0);
+        let mut indexed: Vec<(usize, ScratchPlane)> = (0..total)
+            .into_par_iter()
+            .map(|index| {
+                if run.cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let guide = self.guide(index)?;
+                let plane = self.refine(index, &labels, &guide)?;
+                drop(guide);
+                let _ = std::fs::remove_file(self.scratch.join(format!("guide{index}.f32")));
+                run.progress(
+                    Stage::Weights,
+                    done.fetch_add(1, Ordering::Relaxed) + 1,
+                    total,
+                );
+                Ok((index, plane))
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Restored to frame order before normalising: `normalize` sums across planes, and
+        // float addition is not associative, so a completion-order shuffle would perturb
+        // the output — silently, and differently on every run.
+        indexed.sort_unstable_by_key(|(index, _)| *index);
+        let mut planes: Vec<ScratchPlane> = indexed.into_iter().map(|(_, p)| p).collect();
 
         normalize(&mut planes, run)?;
         Ok(planes)
