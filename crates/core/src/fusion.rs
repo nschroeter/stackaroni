@@ -74,13 +74,50 @@ pub fn level_count(width: u32, height: u32, floor: u32) -> usize {
 }
 
 /// Blur with the binomial kernel and drop every other sample.
+///
+/// The blur is evaluated *only* at the samples that survive decimation. Blurring every
+/// pixel and then keeping one in four — which is what this did — computes four times the
+/// taps it needs, at every pyramid level of every frame, in the pipeline's most expensive
+/// stage.
+///
+/// Arithmetically identical rather than merely equivalent: the same kernel taps summed in
+/// the same order over the same clamped source samples, so it is the same floating-point
+/// expression and not a rearrangement of one. The output-stability gate is what holds
+/// that claim to account.
 pub fn reduce(src: &Bitmap) -> Bitmap {
-    let blurred = blur(src);
-    let mut out = Bitmap::new(src.width.div_ceil(2), src.height.div_ceil(2), src.channels);
-    for y in 0..out.height {
-        for x in 0..out.width {
-            let (si, di) = (blurred.index(2 * x, 2 * y), out.index(x, y));
-            out.data[di..di + out.channels].copy_from_slice(&blurred.data[si..si + out.channels]);
+    let c = src.channels;
+    let (w, h) = (src.width as i64, src.height as i64);
+    let (out_w, out_h) = (src.width.div_ceil(2), src.height.div_ceil(2));
+
+    // Horizontal, at even columns only: full height, half the width.
+    let mut horizontal = Bitmap::new(out_w, src.height, c);
+    for y in 0..h {
+        for ox in 0..out_w {
+            let x = 2 * ox as i64;
+            let di = horizontal.index(ox, y as u32);
+            for (k, weight) in KERNEL.iter().enumerate() {
+                let sx = (x + k as i64 - 2).clamp(0, w - 1);
+                let si = src.index(sx as u32, y as u32);
+                for ch in 0..c {
+                    horizontal.data[di + ch] += weight * src.data[si + ch];
+                }
+            }
+        }
+    }
+
+    // Vertical, at even rows only: a quarter of the original output.
+    let mut out = Bitmap::new(out_w, out_h, c);
+    for oy in 0..out_h {
+        let y = 2 * oy as i64;
+        for ox in 0..out_w {
+            let di = out.index(ox, oy);
+            for (k, weight) in KERNEL.iter().enumerate() {
+                let sy = (y + k as i64 - 2).clamp(0, h - 1);
+                let si = horizontal.index(ox, sy as u32);
+                for ch in 0..c {
+                    out.data[di + ch] += weight * horizontal.data[si + ch];
+                }
+            }
         }
     }
     out
@@ -131,41 +168,6 @@ pub fn expand(src: &Bitmap, width: u32, height: u32) -> Bitmap {
                 } else {
                     (tap(j, ch) + tap(j + 1, ch)) / 2.0
                 };
-            }
-        }
-    }
-    out
-}
-
-/// Separable binomial blur, edges replicated.
-fn blur(src: &Bitmap) -> Bitmap {
-    let c = src.channels;
-    let (w, h) = (src.width as i64, src.height as i64);
-    let mut horizontal = Bitmap::new(src.width, src.height, c);
-
-    for y in 0..h {
-        for x in 0..w {
-            let di = horizontal.index(x as u32, y as u32);
-            for (k, weight) in KERNEL.iter().enumerate() {
-                let sx = (x + k as i64 - 2).clamp(0, w - 1);
-                let si = src.index(sx as u32, y as u32);
-                for ch in 0..c {
-                    horizontal.data[di + ch] += weight * src.data[si + ch];
-                }
-            }
-        }
-    }
-
-    let mut out = Bitmap::new(src.width, src.height, c);
-    for y in 0..h {
-        for x in 0..w {
-            let di = out.index(x as u32, y as u32);
-            for (k, weight) in KERNEL.iter().enumerate() {
-                let sy = (y + k as i64 - 2).clamp(0, h - 1);
-                let si = horizontal.index(x as u32, sy as u32);
-                for ch in 0..c {
-                    out.data[di + ch] += weight * horizontal.data[si + ch];
-                }
             }
         }
     }
