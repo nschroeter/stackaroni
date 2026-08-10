@@ -168,8 +168,17 @@ fn main() -> Result<()> {
 /// Where this stack's result goes.
 fn output_path(cli: &Cli, stack: &Stack, count: usize) -> Result<PathBuf> {
     Ok(match (&cli.output, count) {
-        // A single stack with an explicit path uses it verbatim.
-        (Some(path), 1) if cli.input.is_some() => path.clone(),
+        // A single stack with an explicit path uses it verbatim — but its directory has
+        // to exist, and finding that out at the write means finding out after the whole
+        // pipeline has run. That cost a full 100-frame blossom run once: the failure came
+        // three minutes in, with 37 GB of scratch already written.
+        (Some(path), 1) if cli.input.is_some() => {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating output directory {}", parent.display()))?;
+            }
+            path.clone()
+        }
         (Some(dir), _) => {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("creating output directory {}", dir.display()))?;
