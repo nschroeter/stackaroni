@@ -12,22 +12,28 @@
 //! every control in the parameter panel reaches the pipeline — nothing here is
 //! cosmetic any more.
 //!
-//! # Missing from `CLAUDE.md`'s spec for this view
+//! # A `CLAUDE.md` spec clause intentionally replaced, not dropped
 //!
-//! "Preview registration/focus-map output **on a crop** before running the full stack."
-//! Not built, and not deliberately dropped — it was missed, and this note exists so it
-//! stops being invisible.
+//! The spec for this view asks to "preview registration/focus-map output **on a crop**
+//! before running the full stack". That was built, tried, and removed on 2026-08-10.
 //!
-//! It is the highest-leverage thing left in this view. Every parameter in the panel is
-//! currently validated by committing to a full run: ~20 minutes on a 100-frame stack,
-//! for a guide radius that might be visibly wrong in the first crop. That is the cost
-//! the clause exists to remove, and it is why the panel's controls are exposed at all.
+//! **Why it was removed.** It showed the measured transform for one pair — a scale
+//! factor and an offset — alongside an alignment overlay and a focus heatmap. None of
+//! those answer a question anyone actually has, because there is no baseline to judge
+//! them against: `scale 1.00312` is neither good nor bad on its own, and a focus heatmap
+//! of a single frame says nothing about which frame is sharpest here. It was information
+//! rather than an answer.
 //!
-//! The pieces already exist. `WindowedLaplacian` and `PhaseCorrelation` run per frame,
-//! `debug::write_plane` already renders a focus map for inspection, and a crop is just
-//! a band read — `Image::read_rows` over a sub-rectangle, the same call the thumbnail
-//! and preview decoders make. What is absent is a crop selector in the preview pane and
-//! somewhere to show the two outputs side by side.
+//! **What replaces it.** Pan and zoom on the preview pane, which serves the underlying
+//! need directly: zoom into an antenna and step through frames to see which resolves it,
+//! which is a comparison a person can actually make. The [`View`] state deliberately
+//! survives frame changes for exactly this.
+//!
+//! **What is therefore still not covered.** Nothing previews the *guide radius*,
+//! *epsilon* or *fusion rule* — those act on weights and fusion, which need every frame,
+//! not one crop, so no crop-shaped feature could have covered them either. Judging those
+//! still costs a full run. If that becomes the bottleneck, the shape to reach for is a
+//! run over a spatial subset of every frame, not a richer single-frame preview.
 
 mod run;
 mod stack;
@@ -38,6 +44,7 @@ use std::sync::atomic::AtomicU64;
 use eframe::egui;
 use run::{Export, Outcome, Run, Settings};
 use stack::{Preview, Stack, Thumbnail};
+use stackaroni_core::image::FrameInfo;
 
 fn main() -> eframe::Result {
     eframe::run_native(
@@ -58,6 +65,135 @@ const THUMBNAIL_HEIGHT: f32 = 88.0;
 
 /// Preview key for the fused result, kept clear of every real frame index.
 const RESULT_KEY: usize = usize::MAX;
+
+/// Furthest zoom in, as screen pixels per source pixel. Past 1:1 there is no more
+/// detail in the file, so this is only headroom for looking closely at what is there.
+const MAX_ZOOM: f32 = 4.0;
+
+/// How the source image is mapped onto the pane: `scale` screen pixels per source pixel,
+/// with the source origin at `origin`.
+///
+/// Deliberately survives changing frames. Zooming into an antenna and then stepping
+/// through the stack to see which frame renders it sharpest is the reason this exists,
+/// and resetting the view on every selection would destroy exactly that.
+#[derive(Clone, Copy)]
+struct View {
+    scale: f32,
+    origin: egui::Pos2,
+}
+
+impl View {
+    fn fit(rect: egui::Rect, info: FrameInfo) -> Self {
+        let scale = (rect.width() / info.width as f32).min(rect.height() / info.height as f32);
+        Self {
+            scale,
+            origin: rect.center() - egui::vec2(info.width as f32, info.height as f32) * scale / 2.0,
+        }
+    }
+
+    fn source_to_screen(&self, region: stack::Region) -> egui::Rect {
+        egui::Rect::from_min_size(
+            self.origin + egui::vec2(region.x as f32, region.y as f32) * self.scale,
+            egui::vec2(region.w as f32, region.h as f32) * self.scale,
+        )
+    }
+
+    /// Scroll to zoom about the cursor, left-drag to pan.
+    fn interact(&mut self, ui: &mut egui::Ui, rect: egui::Rect, info: FrameInfo) {
+        let response = ui.interact(
+            rect,
+            ui.id().with("preview-view"),
+            egui::Sense::click_and_drag(),
+        );
+
+        // Panning only exists where there is something off-screen to reach. Fully
+        // visible, dragging would just slide the image around inside the pane for no
+        // reason, so the axis clamps below undo it and the cursor never offers it.
+        let size = egui::vec2(info.width as f32, info.height as f32) * self.scale;
+        let pannable = size.x > rect.width() + 0.5 || size.y > rect.height() + 0.5;
+
+        if response.dragged() && pannable {
+            self.origin += response.drag_delta();
+        }
+        if pannable && (response.dragged() || response.hovered()) {
+            ui.ctx().set_cursor_icon(if response.dragged() {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
+        }
+
+        // Anchored on the pointer, not the pane centre: zooming should keep whatever is
+        // under the cursor under the cursor, which is what makes it feel like moving a
+        // loupe rather than resizing a picture.
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if response.hovered()
+            && scroll != 0.0
+            && let Some(pointer) = response.hover_pos()
+        {
+            let fit = Self::fit(rect, info).scale;
+            let factor = (scroll * 0.004).exp();
+            let scale = (self.scale * factor).clamp(fit.min(MAX_ZOOM), MAX_ZOOM);
+            let applied = scale / self.scale;
+            self.origin = pointer + (self.origin - pointer) * applied;
+            self.scale = scale;
+        }
+
+        // Double-click returns to fit, the standard escape hatch from being lost while
+        // zoomed in.
+        if response.double_clicked() {
+            *self = Self::fit(rect, info);
+        }
+
+        // Per axis, because zoom crosses the two thresholds at different moments: a 3:2
+        // frame in a wider pane overflows vertically well before it overflows
+        // horizontally, and that axis should already pan while the other stays put.
+        //
+        // Overflowing, the image is clamped to cover the pane — no panning past its own
+        // edge into empty space. Fitting, it is pinned centred, which is also what
+        // silently cancels any drag on that axis.
+        let size = egui::vec2(info.width as f32, info.height as f32) * self.scale;
+        self.origin.x = if size.x > rect.width() {
+            self.origin.x.clamp(rect.max.x - size.x, rect.min.x)
+        } else {
+            rect.center().x - size.x / 2.0
+        };
+        self.origin.y = if size.y > rect.height() {
+            self.origin.y.clamp(rect.max.y - size.y, rect.min.y)
+        } else {
+            rect.center().y - size.y / 2.0
+        };
+    }
+
+    /// The source rectangle now visible, plus the width to decode it at.
+    ///
+    /// Padded by half a pane and snapped to a grid so small pans land on the same
+    /// request and reuse the texture, instead of starting a decode per frame of drag.
+    fn wanted_region(&self, rect: egui::Rect, info: FrameInfo) -> (stack::Region, usize) {
+        let to_source = |p: egui::Pos2| (p - self.origin) / self.scale;
+        let min = to_source(rect.min);
+        let max = to_source(rect.max);
+        let pad = (max - min) * 0.25;
+
+        let grid = ((64.0 / self.scale).max(1.0)) as u32;
+        let snap_down = |v: f32| ((v.max(0.0) as u32) / grid) * grid;
+        let snap_up =
+            |v: f32, limit: u32| (((v.max(0.0) as u32).div_ceil(grid) + 1) * grid).min(limit);
+
+        let x = snap_down(min.x - pad.x);
+        let y = snap_down(min.y - pad.y);
+        let region = stack::Region {
+            x,
+            y,
+            w: snap_up(max.x + pad.x, info.width).saturating_sub(x).max(1),
+            h: snap_up(max.y + pad.y, info.height).saturating_sub(y).max(1),
+        };
+        // One output pixel per screen pixel across the region, capped so an extreme zoom
+        // cannot ask for a texture larger than the source it came from.
+        let target = ((region.w as f32 * self.scale) as usize).clamp(256, 4096);
+        (region, target)
+    }
+}
 
 /// Side of the include/exclude checkbox drawn in a plate's corner.
 const BADGE: f32 = 16.0;
@@ -119,6 +255,9 @@ struct App {
     /// The fused result of the last successful run, shown in place of a frame.
     result: Option<std::path::PathBuf>,
     export: Option<Export>,
+    /// How the preview pane is currently zoomed and panned. `None` until first shown,
+    /// then kept across frame changes on purpose.
+    view: Option<View>,
     /// Where the last export landed, so the status bar can say so.
     exported: Option<std::path::PathBuf>,
     /// Shared with worker threads so a superseded load can be abandoned mid-decode.
@@ -668,16 +807,30 @@ impl App {
             }
         };
 
-        // Sized from the pane rather than a constant, so a large window gets a sharper
-        // preview and a small one does not decode pixels it will immediately throw away.
-        // Doubled for a little headroom against resizing and HiDPI.
-        let target = (rect.width() * 2.0).clamp(512.0, 3000.0) as usize;
-        self.preview.request(&path, key, target);
+        let Some(info) = self.stack.as_ref().map(|s| s.info) else {
+            return;
+        };
+        let view = self.view.get_or_insert_with(|| View::fit(rect, info));
+        view.interact(ui, rect, info);
+        let view = *view;
+
+        // Decode what is actually on screen, at screen resolution. Zoomed in, that is a
+        // small region near 1:1; zoomed out to fit, it is the whole frame downsampled,
+        // exactly as before. Padded and snapped so a few pixels of pan reuse the texture
+        // instead of starting a decode per frame of drag.
+        let (region, target) = view.wanted_region(rect, info);
+        self.preview.request(&path, key, region, target);
 
         match (&self.preview.texture, &self.preview.error) {
             (_, Some(error)) => label_in(ui, rect, error, visuals.error_fg_color),
             (Some(texture), None) => {
-                let size = fit(texture.size_vec2(), rect.shrink(8.0).size());
+                // Drawn at wherever *its own* region maps to now, not stretched to the
+                // pane. That is what lets a stale texture stay correct mid-pan: it slides
+                // with the image rather than sitting still while the view moves under it.
+                let placed = match self.preview.region {
+                    Some(r) => view.source_to_screen(r),
+                    None => rect,
+                };
                 let image = egui::Image::new(texture);
                 // Dimmed to match the filmstrip, so the preview cannot contradict what
                 // the badge says about whether this frame is in the run.
@@ -686,15 +839,18 @@ impl App {
                 } else {
                     image.tint(egui::Color32::from_white_alpha(EXCLUDED_OPACITY))
                 };
-                image.paint_at(ui, egui::Rect::from_center_size(rect.center(), size));
+                // Clipped to the pane: zoomed in, the drawn rect is far larger than the
+                // pane and would otherwise paint over the filmstrip and parameter panel.
+                let mut clipped = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                clipped.set_clip_rect(rect);
+                image.paint_at(&clipped, placed);
 
                 if self.preview.is_loading() {
-                    // The old frame stays up while the new one decodes — blanking the
-                    // pane on every selection change would flicker harder than it helps.
-                    // Which makes the indicator the only thing distinguishing "this is
-                    // the frame you picked" from "this is still the previous one", so it
-                    // gets its own backing and the centre of the pane rather than sitting
-                    // as faint text over an arbitrary image.
+                    // The old view stays up while the new region decodes — blanking on
+                    // every pan would flicker harder than it helps. Which makes the
+                    // indicator the only thing distinguishing "this is what you asked
+                    // for" from "this is still the last thing", so it gets its own
+                    // backing rather than sitting as faint text over an arbitrary image.
                     loading_overlay(ui, rect, &visuals);
                 }
             }

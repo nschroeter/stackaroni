@@ -189,22 +189,68 @@ fn decode_all(paths: &[PathBuf], id: u64, generation: &AtomicU64, sender: &Sende
 
 /// Decode one frame down to a thumbnail.
 fn thumbnail(path: &Path) -> Result<egui::ColorImage> {
-    decode_scaled(path, THUMBNAIL_WIDTH, MAX_ROWS_PER_BAND)
+    let info = crate::stack::probe(path)?;
+    decode_region(
+        path,
+        Region::whole(info),
+        THUMBNAIL_WIDTH,
+        MAX_ROWS_PER_BAND,
+    )
 }
 
-/// Decode one frame down to roughly `target_width`, averaging at most `max_rows` source
-/// rows per output row.
+fn probe(path: &Path) -> Result<FrameInfo> {
+    stackaroni_core::tiff_io::probe(path)
+}
+
+/// A rectangle of source pixels.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Region {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+impl Region {
+    pub fn whole(info: FrameInfo) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            w: info.width,
+            h: info.height,
+        }
+    }
+}
+
+/// Decode `region` of a frame down to roughly `target_width`, averaging at most
+/// `max_rows` source rows per output row.
 ///
-/// Shared by the filmstrip and the preview, which differ only in how much they read: a
-/// thumbnail wants speed over fidelity, a preview the reverse.
-fn decode_scaled(path: &Path, target_width: usize, max_rows: u32) -> Result<egui::ColorImage> {
+/// Region-aware because the preview pane zooms. A whole-frame decode at pane resolution
+/// is ~2000 px wide from an 8664 px frame — 23% linear — where a 1-3 px antenna is
+/// sub-pixel and no amount of zooming recovers it. Judging sharpness, which is the whole
+/// reason to zoom, needs the visible part decoded near 1:1 instead.
+fn decode_region(
+    path: &Path,
+    region: Region,
+    target_width: usize,
+    max_rows: u32,
+) -> Result<egui::ColorImage> {
     let image = Image::open(path)?;
     let info = image.info();
 
-    let factor = (info.width as usize / target_width.max(1)).max(1) as u32;
+    let x = region.x.min(info.width.saturating_sub(1));
+    let y = region.y.min(info.height.saturating_sub(1));
+    let region = Region {
+        x,
+        y,
+        w: region.w.clamp(1, info.width - x),
+        h: region.h.clamp(1, info.height - y),
+    };
+
+    let factor = (region.w as usize / target_width.max(1)).max(1) as u32;
     let (width, height) = (
-        (info.width / factor).max(1) as usize,
-        (info.height / factor).max(1) as usize,
+        (region.w / factor).max(1) as usize,
+        (region.h / factor).max(1) as usize,
     );
 
     let rows_per_band = factor.min(max_rows.max(1));
@@ -212,7 +258,7 @@ fn decode_scaled(path: &Path, target_width: usize, max_rows: u32) -> Result<egui
     let mut pixels = Vec::with_capacity(width * height);
 
     for ty in 0..height {
-        let y0 = ty as u32 * factor;
+        let y0 = region.y + ty as u32 * factor;
         let count = rows_per_band.min(info.height - y0);
         image.read_rows(y0, count, &mut band)?;
 
@@ -221,10 +267,11 @@ fn decode_scaled(path: &Path, target_width: usize, max_rows: u32) -> Result<egui
             for row in 0..count as usize {
                 let row = &band[row * info.row_len()..][..info.row_len()];
                 for sx in 0..factor as usize {
-                    let x = (tx * factor as usize + sx).min(info.width as usize - 1);
-                    r += row[x * 3];
-                    g += row[x * 3 + 1];
-                    b += row[x * 3 + 2];
+                    let px = (region.x as usize + tx * factor as usize + sx)
+                        .min(info.width as usize - 1);
+                    r += row[px * 3];
+                    g += row[px * 3 + 1];
+                    b += row[px * 3 + 2];
                 }
             }
             let inv = 1.0 / (count as f32 * factor as f32);
@@ -248,39 +295,58 @@ fn decode_scaled(path: &Path, target_width: usize, max_rows: u32) -> Result<egui
 pub struct Preview {
     /// Which frame the current texture belongs to, once it has arrived.
     pub index: Option<usize>,
+    /// The source rectangle the current texture covers, so the caller can keep drawing
+    /// it in the right place while a newer region is still decoding.
+    pub region: Option<Region>,
     pub texture: Option<egui::TextureHandle>,
     pub error: Option<String>,
-    /// The frame a decode is running for, if any. At most one at a time.
-    pending: Option<usize>,
-    /// The frame wanted next, superseding any earlier want. Intermediate frames are
-    /// never decoded at all.
-    wanted: Option<(usize, PathBuf, usize)>,
+    shown: Option<Want>,
+    /// The request being decoded, if any. At most one at a time.
+    pending: Option<Want>,
+    /// Superseding, not queued: panning should chase the destination rather than decode
+    /// every position passed through on the way there.
+    wanted: Option<Want>,
     channel: Option<Receiver<PreviewMessage>>,
     requests: u64,
+}
+
+#[derive(Clone, PartialEq)]
+struct Want {
+    path: PathBuf,
+    index: usize,
+    region: Region,
+    target_width: usize,
 }
 
 struct PreviewMessage {
     request: u64,
     index: usize,
+    region: Region,
     result: std::result::Result<egui::ColorImage, String>,
 }
 
 impl Preview {
-    /// Ask for `index`, unless it is already shown or already being decoded.
+    /// Ask for `region` of `index`, unless that is already shown or already decoding.
     ///
-    /// Called every pass with the current selection, so it must be cheap and idempotent.
-    pub fn request(&mut self, path: &Path, index: usize, target_width: usize) {
-        // Keyed on the frame having been *attempted*, not on it having succeeded. Keying
-        // on success would re-request a frame that failed to decode on every single pass,
-        // spawning a thread per frame to fail again — a spin loop behind a static error
-        // message. Selection moving elsewhere is what triggers the next decode.
-        if self.index == Some(index) || self.pending == Some(index) {
+    /// Called every pass with the current view, so it must be cheap and idempotent.
+    pub fn request(&mut self, path: &Path, index: usize, region: Region, target_width: usize) {
+        let want = Want {
+            path: path.to_path_buf(),
+            index,
+            region,
+            target_width,
+        };
+        // Keyed on the request having been *attempted*, not on it having succeeded.
+        // Keying on success would re-request a frame that failed to decode on every
+        // single pass, spawning a thread each time to fail again — a spin loop behind a
+        // static error message.
+        if self.shown.as_ref() == Some(&want) || self.pending.as_ref() == Some(&want) {
             self.wanted = None;
             return;
         }
-        // Overwrites any earlier want rather than queueing: clicking through five frames
-        // should decode the fifth, not all five.
-        self.wanted = Some((index, path.to_path_buf(), target_width));
+        // Overwrites any earlier want rather than queueing: dragging across the image
+        // should decode where it lands, not everywhere it passed.
+        self.wanted = Some(want);
         self.start_if_idle();
     }
 
@@ -295,24 +361,26 @@ impl Preview {
         if self.pending.is_some() {
             return;
         }
-        let Some((index, path, target_width)) = self.wanted.take() else {
+        let Some(want) = self.wanted.take() else {
             return;
         };
         self.requests += 1;
         let request = self.requests;
         let (sender, receiver) = channel();
+        let job = want.clone();
 
         std::thread::spawn(move || {
-            let result =
-                decode_scaled(&path, target_width, PREVIEW_MAX_ROWS).map_err(|e| e.to_string());
+            let result = decode_region(&job.path, job.region, job.target_width, PREVIEW_MAX_ROWS)
+                .map_err(|e| e.to_string());
             let _ = sender.send(PreviewMessage {
                 request,
-                index,
+                index: job.index,
+                region: job.region,
                 result,
             });
         });
 
-        self.pending = Some(index);
+        self.pending = Some(want);
         self.channel = Some(receiver);
     }
 
@@ -325,34 +393,37 @@ impl Preview {
             return;
         };
         self.channel = None;
-        self.pending = None;
+        let done = self.pending.take();
 
         // Result first, *then* start the next decode. `start_if_idle` bumps `requests`,
         // so starting first would make the staleness check below compare against the new
         // request's number and discard the result that just arrived — every time.
         //
-        // A superseded request whose thread finished late: its frame is no longer the
-        // selected one, so showing it would put the wrong image under the right label.
+        // A superseded request whose thread finished late: its region is no longer the
+        // visible one, so showing it would put the wrong pixels under the right label.
         if message.request == self.requests {
             match message.result {
                 Ok(image) => {
                     // Assigning here drops the previous handle, and `TextureHandle::drop`
-                    // frees the texture — so the pane holds one frame's worth of GPU
-                    // memory regardless of how many frames have been looked at.
+                    // frees the texture — so the pane holds one region's worth of GPU
+                    // memory however far it has been zoomed or panned.
                     self.texture = Some(ctx.load_texture(
                         format!("preview-{}", message.request),
                         image,
                         egui::TextureOptions::LINEAR,
                     ));
                     self.index = Some(message.index);
+                    self.region = Some(message.region);
                     self.error = None;
                 }
                 Err(error) => {
                     self.texture = None;
+                    self.region = None;
                     self.index = Some(message.index);
                     self.error = Some(error);
                 }
             }
+            self.shown = done;
         }
 
         // Whatever was wanted while this one ran starts now.
@@ -534,7 +605,8 @@ mod tests {
         // The preview fires on every selection change, unlike the filmstrip's one pass
         // per folder, so its per-frame cost and footprint are what bound rapid clicking.
         let started = Instant::now();
-        let preview = decode_scaled(path, 2000, PREVIEW_MAX_ROWS).unwrap();
+        let info = probe(path).unwrap();
+        let preview = decode_region(path, Region::whole(info), 2000, PREVIEW_MAX_ROWS).unwrap();
         println!(
             "\npreview {:?} -> {:?}, {:.1} MB in flight per decode",
             started.elapsed(),
@@ -545,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_scaled_honours_the_requested_width() {
+    fn decode_region_honours_the_requested_width_and_offset() {
         // The preview and the filmstrip share this path and differ only in target size,
         // so a target that was ignored would silently give the preview pane a 128 px
         // image stretched across it — blurry in a way easily mistaken for the stack
@@ -554,8 +626,37 @@ mod tests {
         let path = dir.path().join("f.tif");
         write_flat(&path, 1024, 512, [0.5; 3]);
 
-        assert_eq!(decode_scaled(&path, 128, 4).unwrap().size, [128, 64]);
-        assert_eq!(decode_scaled(&path, 512, 4).unwrap().size, [512, 256]);
+        let whole = Region {
+            x: 0,
+            y: 0,
+            w: 1024,
+            h: 512,
+        };
+        assert_eq!(decode_region(&path, whole, 128, 4).unwrap().size, [128, 64]);
+        assert_eq!(
+            decode_region(&path, whole, 512, 4).unwrap().size,
+            [512, 256]
+        );
+
+        // A sub-rectangle at 1:1 — the zoomed case, where getting the offset wrong would
+        // silently show the wrong part of the frame at the right size.
+        let part = Region {
+            x: 256,
+            y: 128,
+            w: 200,
+            h: 100,
+        };
+        let cropped = decode_region(&path, part, 200, 4).unwrap();
+        assert_eq!(cropped.size, [200, 100]);
+
+        // Off the right edge: clamped to the frame rather than reading past it.
+        let over = Region {
+            x: 900,
+            y: 400,
+            w: 400,
+            h: 400,
+        };
+        assert_eq!(decode_region(&path, over, 400, 4).unwrap().size, [124, 112]);
     }
 
     #[test]
