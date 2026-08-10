@@ -73,6 +73,20 @@ Tenengrad is essentially gradient-energy focus measurement, typically summed (an
 
 Rather than evaluating sharpness at only one spatial scale, a multi-scale method evaluates fine, medium and coarse structure. Gaussian and Laplacian pyramids (Burt & Adelson, 1983) are natural tools for this. Fine scales capture hairs and tiny details; coarser scales capture larger anatomical structures. This reduces the tendency of one tiny high-frequency feature to dictate the focus decision for a whole region.
 
+**Addition — the implemented formulation (T12).** The paragraph above names the idea but not an algorithm, and the literature does not supply one canonical form: what is established is the pyramid (Burt & Adelson, 1983), the measure applied at each level (Nayar & Nakagawa's modified Laplacian and its windowed sum, 1990/1994; surveyed by Pertuz, Puig & Garcia, 2013), and the practice of combining per-scale sharpness rather than trusting one band (recent examples: Zhang et al.'s sum-of-Gaussian-based modified Laplacian, *Digital Signal Processing* 2020; Li et al.'s region mosaicking on Laplacian pyramids, *PLOS ONE* 13(5), 2018). What is implemented here is the composition of those pieces, written out so it is reproducible rather than implied:
+
+```text
+G_0 = luma(I),  G_{k+1} = reduce(G_k)          (binomial [1,4,6,4,1]/16, Burt & Adelson)
+F_k(x,y) = sum over window W of ( laplacian(G_k)(i,j) )^2       (the §3 measure, per level)
+F(x,y)   = F_0(x,y) + sum over k=1..S-1  d^k * expand^k(F_k)(x,y)
+```
+
+`S` is the number of scales and `d` the per-octave decay. The window radius is the same at every level, so a level-`k` window covers `2^k` times the image area — that, not a changing radius, is what makes it multi-scale.
+
+Two properties are deliberate. **`S = 1` reduces to §3 exactly** — not approximately: level 0 is never scaled, so the single-scale metric is the `S = 1` case of this one and is verified as bit-identical by a test rather than by inspection. And **coarse levels are additive, not decisive**: they can raise a region's measured focus but cannot veto a fine-scale response, which is the intended asymmetry for hairs and antennae.
+
+**Known simplification, scoped deliberately for v1: the combination rule is weighted-sum only.** Max-across-scales is the obvious alternative and is *not* implemented — no `rule` parameter exists, and the sum is not one option among several in the code. Two reasons, both revisable. A max rule is winner-takes-all across scales and inherits the spatial-incoherence failure §7 describes, which this project has already measured the cost of once (the argmax label field at `ced3a45`). And it would multiply the evaluation matrix by two before there is evidence that scale count matters at all on these stacks. **Trigger for revisiting:** if the sweep shows detail improving with `S` while background energy also climbs, a max rule is the next thing to try, because that pattern would mean the sum is accumulating background noise along with the signal it is meant to add.
+
 ## 5. Wavelet-domain stacking
 
 Wavelet transforms decompose an image into low-frequency structure and several high-frequency directional bands. Focus decisions can be made on wavelet coefficients and the result reconstructed (Li, Manjunath & Mitra, 1995). Wavelets offer good detail preservation and natural multi-scale behavior, but coefficient-selection rules and boundary handling introduce additional design choices.

@@ -283,15 +283,30 @@ use stackaroni_core::weights::GuideSpace;
 #[derive(Default, PartialEq, Eq, Clone, Copy)]
 enum Algorithm {
     #[default]
-    Pyramid,
+    SingleScale,
+    MultiScale,
 }
 
 impl Algorithm {
-    const ALL: [Self; 1] = [Self::Pyramid];
+    const ALL: [Self; 2] = [Self::SingleScale, Self::MultiScale];
 
+    /// Named for what changes in the photograph, not for the code underneath. Both run the
+    /// same pyramid fusion, and saying so here would tell a photographer nothing they can
+    /// act on — what differs is whether sharpness is judged at one scale or several.
     fn label(self) -> &'static str {
         match self {
-            Self::Pyramid => "Pyramid",
+            Self::SingleScale => "Single-scale",
+            Self::MultiScale => "Multi-scale",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            Self::SingleScale => "Judges sharpness at one detail size. The tuned default.",
+            Self::MultiScale => {
+                "Judges sharpness at several detail sizes at once. No measured gain yet — \
+                 see docs/eval-log.md."
+            }
         }
     }
 }
@@ -313,6 +328,10 @@ struct Params {
     fusion: FusionRule,
     salience_radius: u32,
     pyramid_floor: u32,
+    /// Read only by [`Algorithm::MultiScale`]; kept here rather than on the variant so
+    /// switching back and forth does not discard what was set.
+    focus_scales: u32,
+    focus_decay: f32,
 }
 
 impl Default for Params {
@@ -332,6 +351,8 @@ impl Default for Params {
             },
             salience_radius: defaults::SALIENCE_RADIUS,
             pyramid_floor: defaults::PYRAMID_FLOOR,
+            focus_scales: defaults::FOCUS_SCALES,
+            focus_decay: defaults::FOCUS_DECAY,
         }
     }
 }
@@ -411,6 +432,10 @@ impl App {
         let settings = Settings {
             registration_level: self.params.registration_level,
             focus_radius: self.params.focus_radius,
+            multi_scale: match self.algorithm {
+                Algorithm::SingleScale => None,
+                Algorithm::MultiScale => Some((self.params.focus_scales, self.params.focus_decay)),
+            },
             guide_radius: self.params.guide_radius,
             guide_epsilon: self.params.guide_epsilon,
             guide_space: self.params.guide_space,
@@ -1153,7 +1178,8 @@ impl App {
                                         &mut self.algorithm,
                                         choice,
                                         choice.label(),
-                                    );
+                                    )
+                                    .on_hover_text(choice.hint());
                                 }
                             });
                     });
@@ -1179,14 +1205,23 @@ impl App {
                     });
                     ui.add_space(6.0);
 
+                    let algorithm = self.algorithm;
                     let p = &mut self.params;
 
                     ui.label("Registration");
                     ui.add(egui::Slider::new(&mut p.registration_level, 0..=5).text("level"));
                     ui.add_space(8.0);
 
+                    // The only section that depends on the algorithm. Registration, weight
+                    // refinement and fusion are shared by both, so they stay put — a panel
+                    // that reshuffled everything on a focus-measure change would make the
+                    // two look less comparable than they are.
                     ui.label("Focus measure");
                     ui.add(egui::Slider::new(&mut p.focus_radius, 1..=16).text("radius"));
+                    if algorithm == Algorithm::MultiScale {
+                        ui.add(egui::Slider::new(&mut p.focus_scales, 1..=5).text("scales"));
+                        ui.add(egui::Slider::new(&mut p.focus_decay, 0.25..=2.0).text("decay"));
+                    }
                     ui.add_space(8.0);
 
                     ui.label("Weight refinement");
@@ -1209,8 +1244,10 @@ impl App {
 
                     ui.label("Fusion");
                     ui.horizontal(|ui| {
-                        ui.selectable_value(&mut p.fusion, FusionRule::Blend, "blend");
-                        ui.selectable_value(&mut p.fusion, FusionRule::Select, "select");
+                        // Named for the effect, like the algorithm entries: "Selection"
+                        // takes the sharpest source per region, "Blend" averages them.
+                        ui.selectable_value(&mut p.fusion, FusionRule::Select, "Selection");
+                        ui.selectable_value(&mut p.fusion, FusionRule::Blend, "Blend");
                     });
                     // Only the selection rule reads this, matching the CLI, where it is
                     // documented as ignored by `blend`.

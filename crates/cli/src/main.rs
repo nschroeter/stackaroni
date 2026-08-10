@@ -11,11 +11,11 @@ use fs4::available_space;
 use stackaroni_core::debug;
 use stackaroni_core::defaults;
 use stackaroni_core::discovery::{Stack, discover_stack, discover_test_set};
-use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
+use stackaroni_core::focus::{MultiScaleLaplacian, WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
 use stackaroni_core::grid::Grid;
 use stackaroni_core::pipeline::{
-    FocusMap, Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
+    FocusMap, FocusMetric, Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
 };
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
@@ -48,9 +48,24 @@ struct Cli {
     #[arg(long, default_value_t = defaults::REGISTRATION_LEVEL)]
     registration_level: u32,
 
-    /// Window radius for the windowed-Laplacian focus measure.
+    /// Window radius for the Laplacian focus measure, at every scale it is evaluated on.
     #[arg(long, default_value_t = defaults::FOCUS_RADIUS)]
     focus_radius: u32,
+
+    /// How focus is measured. See `docs/algorithms.md` §3 and §4.
+    ///
+    /// `multi-scale` with `--focus-scales 1` is `single-scale` exactly, not merely
+    /// equivalent — the two share a code path and a bit-identity test.
+    #[arg(long, value_enum, default_value_t = FocusArg::DEFAULT)]
+    focus: FocusArg,
+
+    /// Pyramid levels summed by `--focus multi-scale`. Ignored by `single-scale`.
+    #[arg(long, default_value_t = defaults::FOCUS_SCALES)]
+    focus_scales: u32,
+
+    /// Per-octave weight decay for `--focus multi-scale`. Ignored by `single-scale`.
+    #[arg(long, default_value_t = defaults::FOCUS_DECAY)]
+    focus_decay: f32,
 
     /// Guided-filter radius for weight refinement.
     ///
@@ -106,6 +121,22 @@ impl FusionArg {
         Self::Select
     } else {
         Self::Blend
+    };
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
+enum FocusArg {
+    /// Windowed Laplacian energy at one scale (§3).
+    SingleScale,
+    /// The same measure summed across a Gaussian pyramid (§4).
+    MultiScale,
+}
+
+impl FocusArg {
+    const DEFAULT: Self = if defaults::MULTI_SCALE_FOCUS {
+        Self::MultiScale
+    } else {
+        Self::SingleScale
     };
 }
 
@@ -168,8 +199,17 @@ fn main() -> Result<()> {
 /// Where this stack's result goes.
 fn output_path(cli: &Cli, stack: &Stack, count: usize) -> Result<PathBuf> {
     Ok(match (&cli.output, count) {
-        // A single stack with an explicit path uses it verbatim.
-        (Some(path), 1) if cli.input.is_some() => path.clone(),
+        // A single stack with an explicit path uses it verbatim — but its directory has
+        // to exist, and finding that out at the write means finding out after the whole
+        // pipeline has run. That cost a full 100-frame blossom run once; the failure came
+        // three minutes in, with 38 GB of scratch already written.
+        (Some(path), 1) if cli.input.is_some() => {
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating output directory {}", parent.display()))?;
+            }
+            path.clone()
+        }
         (Some(dir), _) => {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("creating output directory {}", dir.display()))?;
@@ -273,8 +313,21 @@ fn pipeline(
         .collect();
 
     let step = Instant::now();
-    let metric = WindowedLaplacian::new(cli.focus_radius, scratch, by_path.clone());
-    let focus_maps = evaluate_stack(&metric, &stack.frames, &run)?;
+    let metric: Box<dyn FocusMetric> = match cli.focus {
+        FocusArg::SingleScale => Box::new(WindowedLaplacian::new(
+            cli.focus_radius,
+            scratch,
+            by_path.clone(),
+        )),
+        FocusArg::MultiScale => Box::new(MultiScaleLaplacian::new(
+            cli.focus_radius,
+            cli.focus_scales,
+            cli.focus_decay,
+            scratch,
+            by_path.clone(),
+        )),
+    };
+    let focus_maps = evaluate_stack(&*metric, &stack.frames, &run)?;
     println!("  focus     {:>5.0}s", step.elapsed().as_secs_f32());
 
     let step = Instant::now();

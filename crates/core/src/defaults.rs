@@ -15,8 +15,24 @@ use crate::weights::GuideSpace;
 /// Pyramid level for phase correlation.
 pub const REGISTRATION_LEVEL: u32 = 3;
 
-/// Window radius for the windowed-Laplacian focus measure.
+/// Window radius for the Laplacian focus measure, at every scale it is evaluated on.
 pub const FOCUS_RADIUS: u32 = 4;
+
+/// Whether focus is measured across a pyramid (§4) rather than at one scale (§3).
+pub const MULTI_SCALE_FOCUS: bool = false;
+
+/// Pyramid levels the multi-scale measure sums over. Read only when
+/// [`MULTI_SCALE_FOCUS`] is set; `1` is the single-scale measure exactly.
+///
+/// **Not a tuned value, unlike everything else in this file.** The sweep that settled
+/// `GUIDE_RADIUS` was run over scales 1-5 on synthetic_50 and came back flat — detail
+/// 0.330 at every setting — so there is no measured basis for preferring any of them. 3 is
+/// the midpoint of the exposed range. See `docs/eval-log.md`; do not cite this as tuned.
+pub const FOCUS_SCALES: u32 = 3;
+
+/// Per-octave weight decay for the multi-scale measure. Conventional octave halving; the
+/// sweep found the output equally insensitive to this between 0.25 and 2.0.
+pub const FOCUS_DECAY: f32 = 0.5;
 
 /// Guided-filter radius for weight refinement.
 pub const GUIDE_RADIUS: u32 = 4;

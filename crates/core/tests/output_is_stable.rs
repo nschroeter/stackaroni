@@ -87,10 +87,17 @@ fn the_pinned_configuration_is_still_the_shipped_one() {
         defaults::GUIDE_SPACE,
         "guide_space default changed"
     );
-    // A compile-time failure rather than a runtime one, since it is knowable then: the
-    // gate calls `SelectionFusion` directly, so flipping this default would leave the
-    // shipped fusion rule untested rather than merely differently configured.
+    // Compile-time failures rather than runtime ones, since they are knowable then: the
+    // gate calls `SelectionFusion` and `WindowedLaplacian` directly, so flipping either
+    // default would leave the shipped stage untested rather than merely differently
+    // configured.
     const { assert!(defaults::SELECT_FUSION, "the gate fuses by selection") }
+    const {
+        assert!(
+            !defaults::MULTI_SCALE_FOCUS,
+            "the gate measures focus at one scale"
+        )
+    }
 }
 
 /// FNV-1a, written out rather than pulled in: one dependency for sixteen bytes of state is

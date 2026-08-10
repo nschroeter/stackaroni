@@ -44,11 +44,11 @@ use eframe::egui;
 use fs4::available_space;
 use stackaroni_core::defaults;
 use stackaroni_core::error::{Error, Result};
-use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
+use stackaroni_core::focus::{MultiScaleLaplacian, WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
 use stackaroni_core::image::FrameInfo;
 use stackaroni_core::pipeline::{
-    Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
+    FocusMetric, Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
 };
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
@@ -58,6 +58,10 @@ use stackaroni_core::weights::{GuideSpace, GuidedWeights};
 pub struct Settings {
     pub registration_level: u32,
     pub focus_radius: u32,
+    /// `None` measures focus at one scale (§3); `Some((scales, decay))` across a pyramid
+    /// (§4). An `Option` rather than a bool plus two always-present numbers, so the
+    /// parameters that only mean something under multi-scale cannot be set without it.
+    pub multi_scale: Option<(u32, f32)>,
     pub guide_radius: u32,
     pub guide_epsilon: f32,
     pub guide_space: GuideSpace,
@@ -71,6 +75,11 @@ impl Default for Settings {
         Self {
             registration_level: defaults::REGISTRATION_LEVEL,
             focus_radius: defaults::FOCUS_RADIUS,
+            multi_scale: if defaults::MULTI_SCALE_FOCUS {
+                Some((defaults::FOCUS_SCALES, defaults::FOCUS_DECAY))
+            } else {
+                None
+            },
             guide_radius: defaults::GUIDE_RADIUS,
             guide_epsilon: defaults::GUIDE_EPSILON,
             guide_space: defaults::GUIDE_SPACE,
@@ -324,8 +333,21 @@ fn pipeline(
         .zip(transforms.iter().copied())
         .collect();
 
-    let metric = WindowedLaplacian::new(settings.focus_radius, scratch, by_path.clone());
-    let focus_maps = evaluate_stack(&metric, frames, run)?;
+    let metric: Box<dyn FocusMetric> = match settings.multi_scale {
+        None => Box::new(WindowedLaplacian::new(
+            settings.focus_radius,
+            scratch,
+            by_path.clone(),
+        )),
+        Some((scales, decay)) => Box::new(MultiScaleLaplacian::new(
+            settings.focus_radius,
+            scales,
+            decay,
+            scratch,
+            by_path.clone(),
+        )),
+    };
+    let focus_maps = evaluate_stack(&*metric, frames, run)?;
 
     let weights = GuidedWeights::new(
         frames.to_vec(),
