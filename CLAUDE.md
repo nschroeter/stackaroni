@@ -53,19 +53,25 @@ Keep each stage independently replaceable via traits, so different algorithms ca
 benchmarked against each other without rewriting the app:
 
 ```rust
-trait Registration {
+trait Registration: Sync {
     fn align(&self, reference: &Image, target: &Image, run: &dyn RunControl) -> Result<Transform>;
 }
-trait FocusMetric {
+trait FocusMetric: Sync {
     fn evaluate(&self, image: &Image, run: &dyn RunControl) -> Result<FocusMap>;
 }
-trait WeightEstimator {
+trait WeightEstimator: Sync {
     fn weights(&self, focus_maps: &[FocusMap], run: &dyn RunControl) -> Result<WeightMaps>;
 }
-trait ImageFusion {
+trait ImageFusion: Sync {
     fn fuse(&self, images: &[Image], weights: &WeightMaps, run: &dyn RunControl) -> Result<Image>;
 }
 ```
+
+`Sync` is a requirement, not decoration. Stages run across threads: `register_stack` aligns
+every pair concurrently and `evaluate_stack` measures every frame concurrently, both in
+`core` rather than in each caller. An implementation with thread-unsafe interior mutability
+is not a valid stage. `Image` already holds its decoder behind a `Mutex` so handles stay
+`Sync` through it.
 
 `RunControl` carries cancellation and progress together — `cancelled() -> bool` and
 `progress(stage, done, total)`, both defaulted, so `()` is a complete implementation for
@@ -85,7 +91,14 @@ breaking change.
 Checks go at per-frame granularity inside `weights` and `fuse` — plus `labels` and
 `normalize`, which are full banded passes over every plane before and after the per-frame
 loop. Worst-case stop latency is therefore about one frame of fusion, ~6 s on a 50 MP
-stack. **Sub-frame checks were considered and deliberately left out:** responsiveness is
+stack, measured at 6.82 s on blossom.
+
+**Parallelism changed what cancellation guarantees, in the stages that went wide.** Where a
+loop runs across threads, every frame already in flight finishes before the flag is seen, so
+the guarantee is "no *new* work starts", not "stops at frame N". Fusion is the exception and
+deliberately so: its per-frame loop stays sequential, because float addition into the
+accumulator is not associative and going wide there would change the output. That is also
+why fusion's cancellation tests can still pin an exact frame and the weights test cannot. **Sub-frame checks were considered and deliberately left out:** responsiveness is
 dominated by whether the UI acknowledges the click immediately, not by true stop latency,
 and a 6 s tail on a 20-minute operation reads as normal. Revisit only if it actually feels
 slow. Never check inside the final `write_rgb16_srgb` — a truncated TIFF that looks like a
