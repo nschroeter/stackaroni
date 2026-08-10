@@ -40,11 +40,19 @@ comparisons; note it explicitly in `docs/eval-log.md` if you do.
   addition to visual rating, includes simulated focus breathing and sensor
   noise.
 - **Known quirks / limitations:** Faint seam visible at the body's depth-band
-  boundaries even when in focus — cosmetic compositing artifact. Note that
+  boundaries even when in focus — cosmetic compositing artifact.
+  **Staircase aliasing along the thin antenna/leg lines in
+  `ground_truth_all_in_focus.tiff` itself** — a property of how the stack was
+  rendered, not of anything the pipeline does, and not held against output that
+  reproduces it. Read this before treating antenna softness here as a defect: it
+  was chased as one for a day and closed on 2026-08-10 as this artifact, after
+  three measurements had already been designed against it. Note that
   `ground_truth_all_in_focus.tiff` sits in the same directory as the 50
   `frame_*.tiff` files; frame discovery must exclude it or it gets stacked as
   a 51st frame. Frames here are Deflate-compressed with 36 rows/strip, unlike
   the uncompressed 1-row/strip real stacks.
+  **Both artifacts above are in the fixture. A real photograph will not have
+  either, so neither should drive pipeline work.**
 
 <!--
 Add a new section above for each additional stack. Keep the field list
