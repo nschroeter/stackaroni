@@ -142,10 +142,16 @@ judge this the same way, by outcomes I can actually assess, not by aesthetic gue
     against is information rather than an answer. Replaced by pan and zoom on the preview pane,
     which serves the underlying need — zoom into an antenna, step through frames, see which one
     resolves it. Full reasoning in `crates/app/src/main.rs`'s module docs.
-- Use existing egui crates rather than hand-rolling: `egui_extras` (image display, tables), `rfd`
-  (native file/folder dialogs). Only reach for `egui_dock` (dockable/movable panels) if a fixed
-  layout turns out to be genuinely limiting in practice — start with a fixed layout, it's one
-  less unknown.
+- Use existing egui crates rather than hand-rolling: `rfd` for native file/folder dialogs, in
+  use. Only reach for `egui_dock` (dockable/movable panels) if a fixed layout turns out to be
+  genuinely limiting in practice — start with a fixed layout, it's one less unknown.
+- **`egui_extras` was recommended here and deliberately never added.** Not a gap to close, and
+  adding it now would mean an unused dependency. Its image loaders decode *encoded* bytes
+  (PNG/JPEG) behind a URI, whereas frames are 16-bit TIFF decoded through `core` into raw
+  pixels and uploaded with `ctx.load_texture` — a path that has nothing to hand a URI-based
+  loader. Its other draw, `TableBuilder`, has no use in the current UI. The case for it will
+  return if something ever needs to display encoded images or a real table; until then it
+  would be weight for nothing.
 - Keep UI code in the `stackaroni-app` crate only; it depends on `stackaroni-core`, never the
   reverse. UI iteration
   should never risk touching pipeline logic.
