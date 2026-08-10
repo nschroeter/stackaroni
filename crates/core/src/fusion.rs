@@ -18,6 +18,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 use crate::error::{Error, Result};
 use crate::filter::box_sum;
 use crate::image::{FrameInfo, ScratchPlane};
@@ -41,6 +43,13 @@ pub struct Bitmap {
 }
 
 impl Bitmap {
+    /// Only the tests address pixels this way now — the hot paths all walk rows as
+    /// contiguous slices so they can be split across threads.
+    #[cfg(test)]
+    fn index(&self, x: u32, y: u32) -> usize {
+        (y as usize * self.width as usize + x as usize) * self.channels
+    }
+
     pub fn new(width: u32, height: u32, channels: usize) -> Self {
         Self {
             width,
@@ -48,10 +57,6 @@ impl Bitmap {
             channels,
             data: vec![0.0; width as usize * height as usize * channels],
         }
-    }
-
-    fn index(&self, x: u32, y: u32) -> usize {
-        (y as usize * self.width as usize + x as usize) * self.channels
     }
 }
 
@@ -80,46 +85,52 @@ pub fn level_count(width: u32, height: u32, floor: u32) -> usize {
 /// taps it needs, at every pyramid level of every frame, in the pipeline's most expensive
 /// stage.
 ///
-/// Arithmetically identical rather than merely equivalent: the same kernel taps summed in
-/// the same order over the same clamped source samples, so it is the same floating-point
-/// expression and not a rearrangement of one. The output-stability gate is what holds
-/// that claim to account.
+/// This is arithmetically identical rather than merely equivalent: the same kernel taps
+/// are summed in the same order over the same clamped source samples, so it is the same
+/// floating-point expression, not a rearrangement of one. The byte-identical output gate
+/// is what holds that claim to account.
 pub fn reduce(src: &Bitmap) -> Bitmap {
     let c = src.channels;
     let (w, h) = (src.width as i64, src.height as i64);
     let (out_w, out_h) = (src.width.div_ceil(2), src.height.div_ceil(2));
+    let (src_row, out_row) = (src.width as usize * c, out_w as usize * c);
 
-    // Horizontal, at even columns only: full height, half the width.
+    // Rows are independent in both passes, and within a row the kernel taps are still
+    // summed in ascending `k` order — the same additions in the same sequence, just
+    // spread across cores. Float addition is not associative, so "same order" is doing
+    // real work here, not being pedantic.
     let mut horizontal = Bitmap::new(out_w, src.height, c);
-    for y in 0..h {
-        for ox in 0..out_w {
-            let x = 2 * ox as i64;
-            let di = horizontal.index(ox, y as u32);
-            for (k, weight) in KERNEL.iter().enumerate() {
-                let sx = (x + k as i64 - 2).clamp(0, w - 1);
-                let si = src.index(sx as u32, y as u32);
-                for ch in 0..c {
-                    horizontal.data[di + ch] += weight * src.data[si + ch];
+    horizontal
+        .data
+        .par_chunks_mut(out_row)
+        .enumerate()
+        .for_each(|(y, dst)| {
+            let row = &src.data[y * src_row..][..src_row];
+            for ox in 0..out_w as usize {
+                let x = 2 * ox as i64;
+                for (k, weight) in KERNEL.iter().enumerate() {
+                    let sx = (x + k as i64 - 2).clamp(0, w - 1) as usize;
+                    for ch in 0..c {
+                        dst[ox * c + ch] += weight * row[sx * c + ch];
+                    }
                 }
             }
-        }
-    }
+        });
 
-    // Vertical, at even rows only: a quarter of the original output.
     let mut out = Bitmap::new(out_w, out_h, c);
-    for oy in 0..out_h {
-        let y = 2 * oy as i64;
-        for ox in 0..out_w {
-            let di = out.index(ox, oy);
+    out.data
+        .par_chunks_mut(out_row)
+        .enumerate()
+        .for_each(|(oy, dst)| {
+            let y = 2 * oy as i64;
             for (k, weight) in KERNEL.iter().enumerate() {
-                let sy = (y + k as i64 - 2).clamp(0, h - 1);
-                let si = horizontal.index(ox, sy as u32);
-                for ch in 0..c {
-                    out.data[di + ch] += weight * horizontal.data[si + ch];
+                let sy = (y + k as i64 - 2).clamp(0, h - 1) as usize;
+                let row = &horizontal.data[sy * out_row..][..out_row];
+                for (slot, &v) in dst.iter_mut().zip(row) {
+                    *slot += weight * v;
                 }
             }
-        }
-    }
+        });
     out
 }
 
@@ -133,44 +144,49 @@ pub fn reduce(src: &Bitmap) -> Bitmap {
 /// half.
 pub fn expand(src: &Bitmap, width: u32, height: u32) -> Bitmap {
     let c = src.channels;
+    let wide_row = width as usize * c;
 
     let mut wide = Bitmap::new(width, src.height, c);
-    for y in 0..src.height {
-        for x in 0..width {
-            let di = wide.index(x, y);
-            let i = (x / 2) as i64;
-            let tap = |o: i64, ch: usize| {
-                let sx = o.clamp(0, src.width as i64 - 1) as u32;
-                src.data[src.index(sx, y) + ch]
-            };
-            for ch in 0..c {
-                wide.data[di + ch] = if x % 2 == 0 {
-                    (tap(i - 1, ch) + 6.0 * tap(i, ch) + tap(i + 1, ch)) / 8.0
-                } else {
-                    (tap(i, ch) + tap(i + 1, ch)) / 2.0
+    wide.data
+        .par_chunks_mut(wide_row)
+        .enumerate()
+        .for_each(|(y, dst)| {
+            for x in 0..width as usize {
+                let i = (x / 2) as i64;
+                let tap = |o: i64, ch: usize| {
+                    let sx = o.clamp(0, src.width as i64 - 1) as usize;
+                    src.data[(y * src.width as usize + sx) * c + ch]
                 };
+                for ch in 0..c {
+                    dst[x * c + ch] = if x % 2 == 0 {
+                        (tap(i - 1, ch) + 6.0 * tap(i, ch) + tap(i + 1, ch)) / 8.0
+                    } else {
+                        (tap(i, ch) + tap(i + 1, ch)) / 2.0
+                    };
+                }
             }
-        }
-    }
+        });
 
     let mut out = Bitmap::new(width, height, c);
-    for y in 0..height {
-        let j = (y / 2) as i64;
-        for x in 0..width {
-            let di = out.index(x, y);
-            let tap = |o: i64, ch: usize| {
-                let sy = o.clamp(0, wide.height as i64 - 1) as u32;
-                wide.data[wide.index(x, sy) + ch]
-            };
-            for ch in 0..c {
-                out.data[di + ch] = if y % 2 == 0 {
-                    (tap(j - 1, ch) + 6.0 * tap(j, ch) + tap(j + 1, ch)) / 8.0
-                } else {
-                    (tap(j, ch) + tap(j + 1, ch)) / 2.0
+    out.data
+        .par_chunks_mut(wide_row)
+        .enumerate()
+        .for_each(|(y, dst)| {
+            let j = (y / 2) as i64;
+            for x in 0..width as usize {
+                let tap = |o: i64, ch: usize| {
+                    let sy = o.clamp(0, wide.height as i64 - 1) as usize;
+                    wide.data[(sy * width as usize + x) * c + ch]
                 };
+                for ch in 0..c {
+                    dst[x * c + ch] = if y % 2 == 0 {
+                        (tap(j - 1, ch) + 6.0 * tap(j, ch) + tap(j + 1, ch)) / 8.0
+                    } else {
+                        (tap(j, ch) + tap(j + 1, ch)) / 2.0
+                    };
+                }
             }
-        }
-    }
+        });
     out
 }
 
@@ -436,12 +452,18 @@ fn select_more_salient(dst: &mut Bitmap, best: &mut [f32], src: &Bitmap, radius:
         .collect();
     let salience = box_sum(&energy, src.width, src.height, radius);
 
-    for i in 0..n {
-        if salience[i] > best[i] {
-            best[i] = salience[i];
-            dst.data[i * 3..i * 3 + 3].copy_from_slice(&src.data[i * 3..i * 3 + 3]);
-        }
-    }
+    // Each position decides for itself, so splitting them changes nothing.
+    dst.data
+        .par_chunks_mut(3)
+        .zip(best.par_iter_mut())
+        .zip(salience.par_iter())
+        .zip(src.data.par_chunks(3))
+        .for_each(|(((slot, best), &salience), source)| {
+            if salience > *best {
+                *best = salience;
+                slot.copy_from_slice(source);
+            }
+        });
 }
 
 fn plane_to_bitmap(plane: &ScratchPlane) -> Result<Bitmap> {
@@ -495,15 +517,19 @@ fn warp_frame(image: &Image, transform: Transform, info: FrameInfo) -> Result<Bi
             top * (1.0 - fy) + bottom * fy
         };
 
-        for r in 0..rows {
-            for x in 0..info.width {
-                let (sx, sy) = transform.apply(x as f32 - cx, (y0 + r) as f32 - cy);
-                let di = out.index(x, y0 + r);
-                for ch in 0..3 {
-                    out.data[di + ch] = sample(sx + cx, sy + cy, ch);
+        let row_len = info.row_len();
+        out.data[y0 as usize * row_len..][..rows as usize * row_len]
+            .par_chunks_mut(row_len)
+            .enumerate()
+            .for_each(|(r, dst)| {
+                let y = (y0 + r as u32) as f32 - cy;
+                for x in 0..info.width as usize {
+                    let (sx, sy) = transform.apply(x as f32 - cx, y);
+                    for ch in 0..3 {
+                        dst[x * 3 + ch] = sample(sx + cx, sy + cy, ch);
+                    }
                 }
-            }
-        }
+            });
         y0 += rows;
     }
     Ok(out)
