@@ -272,6 +272,30 @@ const EXCLUDED_OPACITY: u8 = 150;
 use stackaroni_core::defaults;
 use stackaroni_core::weights::GuideSpace;
 
+/// Which end-to-end method fuses the stack, named the way Zerene and Helicon name theirs:
+/// one coarse choice at the top, tuning underneath.
+///
+/// One entry today, and a combo box is still the right control for it. Every method that
+/// might join it — a depth-map approach, §8's graph-cut labelling — replaces several stages
+/// at once rather than flipping one parameter, so it needs a home above the sliders rather
+/// than among them. Naming the current one in the UI also stops "Pyramid" from being
+/// something the user has to infer from a `blend`/`select` toggle further down.
+#[derive(Default, PartialEq, Eq, Clone, Copy)]
+enum Algorithm {
+    #[default]
+    Pyramid,
+}
+
+impl Algorithm {
+    const ALL: [Self; 1] = [Self::Pyramid];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pyramid => "Pyramid",
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum FusionRule {
     Blend,
@@ -315,6 +339,9 @@ impl Default for Params {
 #[derive(Default)]
 struct App {
     selected: usize,
+    /// Held outside [`Params`], which maps field-for-field onto what a run consumes.
+    /// Nothing to pass through yet: with one method there is nothing to choose between.
+    algorithm: Algorithm,
     params: Params,
     stack: Option<Stack>,
     preview: Preview,
@@ -1115,6 +1142,24 @@ impl App {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Algorithm").strong());
+                        egui::ComboBox::from_id_salt("algorithm")
+                            .selected_text(self.algorithm.label())
+                            .show_ui(ui, |ui| {
+                                for choice in Algorithm::ALL {
+                                    ui.selectable_value(
+                                        &mut self.algorithm,
+                                        choice,
+                                        choice.label(),
+                                    );
+                                }
+                            });
+                    });
+                    ui.add_space(6.0);
+                    ui.separator();
+
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Parameters").strong());
