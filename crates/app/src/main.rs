@@ -205,6 +205,57 @@ impl View {
     }
 }
 
+/// A finished run, retained after the worker is gone.
+///
+/// The modal stays up rather than vanishing at completion: the per-stage timings only
+/// exist while it is on screen, and a dialog that disappears the instant the work ends
+/// takes the answer with it just as the user looks up.
+struct RunSummary {
+    headline: &'static str,
+    detail: Option<String>,
+    elapsed: std::time::Duration,
+    stages: [Option<std::time::Duration>; 4],
+}
+
+/// Names shown in the run modal, in the order the pipeline executes them.
+const RUN_STAGES: [&str; 4] = ["Register", "Focus", "Weights", "Fuse"];
+
+/// A small state marker: filled and ticked when done, ringed when running, hollow when
+/// still to come. Drawn rather than typed, for the same reason the filmstrip badge is —
+/// no glyph in the default font stack is guaranteed on every platform.
+fn phase_marker(ui: &mut egui::Ui, state: &str, colour: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(14.0), egui::Sense::hover());
+    let centre = rect.center();
+    let painter = ui.painter();
+    match state {
+        "done" => {
+            painter.circle_filled(centre, 7.0, colour);
+            let stroke = egui::Stroke::new(2.0, ui.visuals().strong_text_color());
+            let b = rect.shrink(4.0);
+            let elbow = egui::pos2(b.left() + b.width() * 0.36, b.bottom());
+            painter.line_segment([egui::pos2(b.left(), b.center().y), elbow], stroke);
+            painter.line_segment([elbow, egui::pos2(b.right(), b.top())], stroke);
+        }
+        "now" => {
+            painter.circle_stroke(centre, 6.0, egui::Stroke::new(2.0, colour));
+            painter.circle_filled(centre, 2.5, colour);
+        }
+        _ => {
+            painter.circle_stroke(centre, 6.0, egui::Stroke::new(1.0, colour));
+        }
+    }
+}
+
+/// `m:ss`, or `h:mm:ss` once a run is long enough to need it.
+fn clock(d: std::time::Duration) -> String {
+    let s = d.as_secs();
+    if s >= 3600 {
+        format!("{}:{:02}:{:02}", s / 3600, (s % 3600) / 60, s % 60)
+    } else {
+        format!("{}:{:02}", s / 60, s % 60)
+    }
+}
+
 /// Side of the include/exclude checkbox drawn in a plate's corner.
 const BADGE: f32 = 16.0;
 
@@ -268,6 +319,8 @@ struct App {
     /// How the preview pane is currently zoomed and panned. `None` until first shown,
     /// then kept across frame changes on purpose.
     view: Option<View>,
+    /// A finished run, kept on screen until dismissed so the timings can be read.
+    run_summary: Option<RunSummary>,
     /// What a startup sweep reclaimed, if anything. Reported rather than silent, because
     /// tens of GB disappearing without explanation is worse than a line of text.
     reaped: Option<reap::Reaped>,
@@ -335,6 +388,7 @@ impl App {
                 self.error = None;
                 self.result = None;
                 self.exported = None;
+                self.run_summary = None;
                 self.run = Some(run);
             }
             // Loud and immediate: a run that cannot fit must say so on the button
@@ -401,7 +455,24 @@ impl App {
                 ctx.request_repaint_after(std::time::Duration::from_millis(250));
             }
             Some(outcome) => {
+                let shared = std::sync::Arc::clone(&run.shared);
+                shared.finish();
+                let (headline, detail) = match &outcome {
+                    Outcome::Done(_) => ("Finished", None),
+                    Outcome::Cancelled => (
+                        "Cancelled",
+                        Some("stopped before the output was written".to_string()),
+                    ),
+                    Outcome::Failed(error) => ("Failed", Some(error.clone())),
+                };
+                self.run_summary = Some(RunSummary {
+                    headline,
+                    detail,
+                    elapsed: shared.elapsed(),
+                    stages: shared.stage_times(),
+                });
                 self.run = None;
+
                 match outcome {
                     Outcome::Done(path) => {
                         self.preview = Preview::default();
@@ -468,10 +539,160 @@ impl eframe::App for App {
             .show(ui, |ui| self.parameters(ui));
 
         egui::CentralPanel::default().show(ui, |ui| self.preview(ui));
+
+        // Last, so it sits over the panels rather than under them.
+        let ctx = ui.ctx().clone();
+        self.run_modal(&ctx);
     }
 }
 
 impl App {
+    /// The four phases of a run, all visible, with only the current one moving.
+    ///
+    /// A single bar that fills and restarts four times reads as a bug — the run looks
+    /// finished, then apparently starts over. Showing every phase at once makes the shape of
+    /// the work legible instead: what is done, what is running, what is still to come.
+    /// Standard multi-step progress, the same pattern an installer uses.
+    ///
+    /// Modal because it matches what is already true: during a run the only available action
+    /// is Cancel. The panels behind it are disabled anyway, and the backdrop makes that
+    /// obvious rather than leaving the user to discover it by clicking.
+    fn run_modal(&mut self, ctx: &egui::Context) {
+        // One dialog, two states: a run in flight, and the same run once it has ended.
+        // Sharing the layout is what makes the transition read as "this finished" rather
+        // than "something else appeared".
+        enum Shown {
+            Running(std::sync::Arc<run::Shared>),
+            Finished,
+        }
+        let shown = match (&self.run, &self.run_summary) {
+            (Some(run), _) => Shown::Running(std::sync::Arc::clone(&run.shared)),
+            (None, Some(_)) => Shown::Finished,
+            (None, None) => return,
+        };
+
+        let (current, times, elapsed, headline, detail, progress) = match &shown {
+            Shown::Running(shared) => {
+                let (_, done, total) = shared.snapshot();
+                (
+                    shared.stage_index(),
+                    shared.stage_times(),
+                    shared.elapsed(),
+                    format!(
+                        "Stacking {}",
+                        self.stack.as_ref().map(|s| s.name.as_str()).unwrap_or("")
+                    ),
+                    None,
+                    Some((done, total)),
+                )
+            }
+            Shown::Finished => {
+                let summary = self.run_summary.as_ref().expect("checked above");
+                (
+                    // Past the last stage, so every phase draws as complete.
+                    RUN_STAGES.len(),
+                    summary.stages,
+                    summary.elapsed,
+                    summary.headline.to_string(),
+                    summary.detail.clone(),
+                    None,
+                )
+            }
+        };
+
+        let mut close = false;
+        egui::Modal::new(egui::Id::new("run-progress")).show(ctx, |ui| {
+            ui.set_width(400.0);
+            ui.heading(headline.trim());
+            if let Some(detail) = &detail {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(detail).weak());
+            }
+            ui.add_space(10.0);
+
+            for (index, stage) in RUN_STAGES.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let (state, colour) = match index.cmp(&current) {
+                        std::cmp::Ordering::Less => ("done", ui.visuals().selection.bg_fill),
+                        std::cmp::Ordering::Equal => ("now", ui.visuals().strong_text_color()),
+                        std::cmp::Ordering::Greater => ("todo", ui.visuals().weak_text_color()),
+                    };
+                    phase_marker(ui, state, colour);
+                    ui.add_space(6.0);
+
+                    let label = egui::RichText::new(*stage);
+                    ui.label(match index.cmp(&current) {
+                        std::cmp::Ordering::Equal => label.strong(),
+                        std::cmp::Ordering::Greater => label.weak(),
+                        std::cmp::Ordering::Less => label,
+                    });
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some((done, total)) = progress.filter(|_| index == current) {
+                            let fraction = if total == 0 {
+                                0.0
+                            } else {
+                                done as f32 / total as f32
+                            };
+                            ui.add(
+                                egui::ProgressBar::new(fraction)
+                                    .desired_width(170.0)
+                                    .text(format!("{done}/{total}")),
+                            );
+                        } else if let Some(took) = times[index] {
+                            ui.label(
+                                egui::RichText::new(format!("{:.0}s", took.as_secs_f32())).weak(),
+                            );
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+            }
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("elapsed {}", clock(elapsed))).strong());
+                if let Shown::Running(shared) = &shown
+                    && shared.cancel_requested()
+                {
+                    ui.label(egui::RichText::new("· stopping after this frame").weak());
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    match &shown {
+                        Shown::Running(shared) => {
+                            let cancelling = shared.cancel_requested();
+                            let label = if cancelling {
+                                "Cancelling…"
+                            } else {
+                                "Cancel"
+                            };
+                            if ui
+                                .add_enabled(!cancelling, egui::Button::new(label))
+                                .clicked()
+                            {
+                                shared.cancel();
+                            }
+                        }
+                        // Dismissed by hand, never automatically: the timings are only
+                        // here, and a dialog that closes itself takes them away exactly
+                        // when someone looks up to read them.
+                        Shown::Finished => {
+                            if ui.button("Close").clicked() {
+                                close = true;
+                            }
+                        }
+                    }
+                });
+            });
+        });
+
+        if close {
+            self.run_summary = None;
+        }
+    }
+
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -570,23 +791,13 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(2.0);
         if let Some(run) = &self.run {
-            let (stage, done, total) = run.shared.snapshot();
+            // No progress, no clock: the modal is on screen and owns both. Repeating
+            // the elapsed time behind it just gives the eye two places to read the same
+            // number.
+            let _ = run;
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(egui::RichText::new(stage.label()).strong());
-                let fraction = if total == 0 {
-                    0.0
-                } else {
-                    done as f32 / total as f32
-                };
-                ui.add(
-                    egui::ProgressBar::new(fraction)
-                        .desired_width(220.0)
-                        .text(format!("{done}/{total}")),
-                );
-                if run.shared.cancel_requested() {
-                    ui.label(egui::RichText::new("stopping after this frame").weak());
-                }
+                ui.label(egui::RichText::new("stacking…").strong());
             });
             ui.add_space(2.0);
             return;

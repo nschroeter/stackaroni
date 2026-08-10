@@ -35,9 +35,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use fs4::available_space;
@@ -70,6 +71,12 @@ pub struct Shared {
     stage: AtomicUsize,
     done: AtomicUsize,
     total: AtomicUsize,
+    /// Milliseconds elapsed when each stage finished; 0 while it has not.
+    ///
+    /// Recorded on the transition rather than by the caller, so a stage that reports no
+    /// progress at all still gets a time when the next one starts.
+    finished_ms: [AtomicU64; 4],
+    started: Instant,
     ctx: egui::Context,
 }
 
@@ -82,6 +89,8 @@ impl Shared {
             stage: AtomicUsize::new(0),
             done: AtomicUsize::new(0),
             total: AtomicUsize::new(0),
+            finished_ms: Default::default(),
+            started: Instant::now(),
             ctx,
         }
     }
@@ -93,6 +102,47 @@ impl Shared {
             self.done.load(Ordering::Relaxed),
             self.total.load(Ordering::Relaxed),
         )
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    /// Index of the stage currently running, and how long each finished stage took.
+    ///
+    /// Everything before the current index is done, everything after has not started —
+    /// which is what lets the run show four phases at once instead of one bar that fills
+    /// and empties four times.
+    pub fn stage_times(&self) -> [Option<Duration>; 4] {
+        // The stamps are cumulative — elapsed *at the moment* each stage finished — so
+        // they have to be differenced to give each stage its own duration. Reading them
+        // directly showed Focus as register+focus and Weights as the sum of three, which
+        // looks entirely plausible until you add the numbers up.
+        let mut previous = 0u64;
+        std::array::from_fn(|i| match self.finished_ms[i].load(Ordering::Relaxed) {
+            0 => None,
+            cumulative => {
+                let own = cumulative.saturating_sub(previous);
+                previous = cumulative;
+                Some(Duration::from_millis(own))
+            }
+        })
+    }
+
+    /// Stamp whatever stage is still running as finished now.
+    ///
+    /// Transitions stamp the stage they leave, so the last stage never gets one — there
+    /// is nothing after it. Called when the run ends so a finished run shows four
+    /// completed phases rather than three and a blank.
+    pub fn finish(&self) {
+        let now = self.started.elapsed().as_millis() as u64;
+        for slot in &self.finished_ms[..=self.stage_index()] {
+            let _ = slot.compare_exchange(0, now.max(1), Ordering::Relaxed, Ordering::Relaxed);
+        }
+    }
+
+    pub fn stage_index(&self) -> usize {
+        self.stage.load(Ordering::Relaxed).min(3)
     }
 
     pub fn cancel(&self) {
@@ -111,7 +161,15 @@ impl RunControl for Shared {
 
     fn progress(&self, stage: Stage, done: usize, total: usize) {
         let index = STAGES.iter().position(|s| *s == stage).unwrap_or(0);
-        self.stage.store(index, Ordering::Relaxed);
+        // Stages only ever move forward, so a higher index means everything below it is
+        // finished. Stamping them here also covers a stage that reported nothing.
+        let previous = self.stage.swap(index, Ordering::Relaxed);
+        if index > previous {
+            let now = self.started.elapsed().as_millis() as u64;
+            for slot in &self.finished_ms[previous..index] {
+                let _ = slot.compare_exchange(0, now.max(1), Ordering::Relaxed, Ordering::Relaxed);
+            }
+        }
         self.done.store(done, Ordering::Relaxed);
         self.total.store(total, Ordering::Relaxed);
         // The only thing that makes any of this visible.
