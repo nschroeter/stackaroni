@@ -97,10 +97,11 @@ happened — there is no partial output to preserve, precisely because the write
 interrupted.
 
 `Result` is `stackaroni_core::error::Result`, over a typed `Error` enum rather than
-`anyhow`. `core` is a library boundary consumed by both `cli` and `app`, and the
-debug/diagnostic view needs to tell failure kinds apart — "frame 47 failed to decode"
-(`Error::Decode`) and "ran out of scratch disk" (`Error::Scratch`) are different
-situations for the user. `cli` and `app` still use `anyhow` for their own internal
+`anyhow`. `core` is a library boundary consumed by both `cli` and `app`, and callers need
+to tell failure kinds apart — "frame 47 failed to decode" (`Error::Decode`), "ran out of
+scratch disk" (`Error::Scratch`) and "you pressed cancel" (`Error::Cancelled`) are
+different situations for the user, and the app already branches on the last of those to
+decide whether to keep the scratch directory. `cli` and `app` still use `anyhow` for their own internal
 error handling; `core::Error` converts into it via `?`.
 
 None of these types owns pixel data. `Image` reads bands from its TIFF on demand;
@@ -126,13 +127,21 @@ judge this the same way, by outcomes I can actually assess, not by aesthetic gue
   module, darktable, Zerene Stacker, Helicon Focus) — follow it rather than designing a new
   layout from scratch.
 - Required views:
-  1. **Main stacking view** — load a folder of TIFFs, see thumbnails, preview
-     registration/focus-map output on a crop before running the full stack, adjust the handful
-     of exposed parameters, run, export.
-  2. **Debug/diagnostic view** — a place to inspect the per-stage debug output the pipeline
-     already produces (alignment overlay, focus-measure heatmap, weight map), not just the
-     final fused image. This is the visual equivalent of the "Pipeline architecture" debug-output
-     requirement above — it needs a home in the UI, not just on disk.
+  1. **Main stacking view** — load a folder of TIFFs, see thumbnails, pan and zoom them to
+     judge sharpness, adjust the handful of exposed parameters, run, export.
+- **Deliberately not built. Do not rebuild these from this file.** Both were specified here,
+  reconsidered against something running, and dropped on purpose. Recording that is the point:
+  a later reading of this document would otherwise find them missing and treat it as an
+  omission — which is exactly how a checklist that is *supposed* to catch silent gaps turns
+  into one that manufactures phantom work.
+  - **A debug/diagnostic view.** The pipeline already writes per-stage output (alignment
+    overlay, focus-measure heatmap, weight map) to `target/debug-out/`, and opening those files
+    directly is no worse than a viewer inside the app would be. Dropped 2026-08-10.
+  - **Previewing registration/focus-map output on a crop**, once part of view 1. Built, run,
+    and removed the same day: a scale factor and an offset with no baseline to judge them
+    against is information rather than an answer. Replaced by pan and zoom on the preview pane,
+    which serves the underlying need — zoom into an antenna, step through frames, see which one
+    resolves it. Full reasoning in `crates/app/src/main.rs`'s module docs.
 - Use existing egui crates rather than hand-rolling: `egui_extras` (image display, tables), `rfd`
   (native file/folder dialogs). Only reach for `egui_dock` (dockable/movable panels) if a fixed
   layout turns out to be genuinely limiting in practice — start with a fixed layout, it's one
