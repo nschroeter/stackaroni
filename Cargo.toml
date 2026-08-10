@@ -6,3 +6,13 @@ members = ["crates/core", "crates/cli", "crates/app"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+
+# Numeric inner loops benefit disproportionately from cross-crate inlining, and the
+# pipeline is one crate calling another (`filter::box_sum` from `focus`, `weights` and
+# `fusion`) in its hottest paths. Costs compile time, changes no semantics: Rust does not
+# reassociate or contract float operations without explicit permission, so the
+# byte-identical output gate should hold across this — and if it does not, that is worth
+# knowing rather than assuming.
+[profile.release]
+lto = "thin"
+codegen-units = 1
