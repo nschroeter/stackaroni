@@ -188,19 +188,26 @@ impl RunControl for () {}
 // `docs/algorithms.md` §10) iterates to convergence *inside* `align`. Adding the
 // parameter then would be a breaking change; leaving it off now would mean an
 // implementer has nothing telling them cancellation is expected.
+//
+// All four are `Sync`, which is a requirement rather than an accident: the stages are
+// run across threads (`register_stack` aligns every pair concurrently, `weights`
+// refines every frame concurrently), and `docs/algorithms.md` §15 always intended
+// that. `Image` already holds its decoder behind a `Mutex` so handles stay `Sync`
+// through it. An implementation with thread-unsafe interior mutability is therefore
+// not a valid stage, and the bound says so rather than leaving it to be discovered.
 
 /// Estimate the geometric correction aligning `target` onto `reference`.
-pub trait Registration {
+pub trait Registration: Sync {
     fn align(&self, reference: &Image, target: &Image, run: &dyn RunControl) -> Result<Transform>;
 }
 
 /// Measure per-pixel focus quality across one frame.
-pub trait FocusMetric {
+pub trait FocusMetric: Sync {
     fn evaluate(&self, image: &Image, run: &dyn RunControl) -> Result<FocusMap>;
 }
 
 /// Turn per-frame focus maps into per-frame blending weights.
-pub trait WeightEstimator {
+pub trait WeightEstimator: Sync {
     fn weights(&self, focus_maps: &[FocusMap], run: &dyn RunControl) -> Result<WeightMaps>;
 }
 
@@ -209,7 +216,7 @@ pub trait WeightEstimator {
 /// The output path is supplied when the implementation is constructed rather than
 /// through this method, the same constructor-injection pattern the guided-filter
 /// weight estimator uses for its guide images.
-pub trait ImageFusion {
+pub trait ImageFusion: Sync {
     fn fuse(&self, images: &[Image], weights: &WeightMaps, run: &dyn RunControl) -> Result<Image>;
 }
 

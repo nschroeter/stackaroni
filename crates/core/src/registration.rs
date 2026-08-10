@@ -6,6 +6,9 @@
 //! be a second implementation of [`Registration`], deliberately not built yet.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rayon::prelude::*;
 
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex32;
@@ -225,33 +228,51 @@ pub fn register_stack(
         return Ok(transforms);
     }
     let anchor = n / 2;
-    let mut done = 0;
 
-    // Checked once per pair, which is the natural unit here: a pair is ~1.6 s at the
-    // default level, and transforms chain outward from the anchor so there is no
-    // smaller step that leaves the result consistent.
+    // Split into the part that can go wide and the part that cannot.
+    //
+    // Each *pairwise* alignment is independent — it reads two frames and returns one
+    // transform — so all `n - 1` of them run concurrently. Only the *chaining* is
+    // sequential, because `transforms[i]` composes onto `transforms[i-1]`, and that is
+    // a handful of multiplies over the whole stack rather than the ~1.6 s per pair the
+    // alignment costs. Composing afterwards in index order also keeps the result
+    // independent of the order the threads happen to finish in.
+    let done = AtomicUsize::new(0);
+    let steps: Vec<Transform> = (0..n)
+        .into_par_iter()
+        .filter(|&i| i != anchor)
+        .map(|i| {
+            if run.cancelled() {
+                return Err(Error::Cancelled);
+            }
+            // Outward from the anchor: frames after it align against their predecessor,
+            // frames before it against their successor.
+            let reference = if i > anchor { i - 1 } else { i + 1 };
+            let reference = Image::open(&frames[reference])?;
+            let curr = Image::open(&frames[i])?;
+            let step = registration.align(&reference, &curr, run)?;
+            run.progress(
+                Stage::Register,
+                done.fetch_add(1, Ordering::Relaxed) + 1,
+                n - 1,
+            );
+            Ok((i, step))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(|mut pairs| {
+            pairs.sort_unstable_by_key(|(i, _)| *i);
+            let mut steps = vec![Transform::IDENTITY; n];
+            for (i, step) in pairs {
+                steps[i] = step;
+            }
+            steps
+        })?;
+
     for i in anchor + 1..n {
-        if run.cancelled() {
-            return Err(Error::Cancelled);
-        }
-        let prev = Image::open(&frames[i - 1])?;
-        let curr = Image::open(&frames[i])?;
-        let step = registration.align(&prev, &curr, run)?;
-        transforms[i] = transforms[i - 1].then(step);
-        done += 1;
-        run.progress(Stage::Register, done, n - 1);
+        transforms[i] = transforms[i - 1].then(steps[i]);
     }
-
     for i in (0..anchor).rev() {
-        if run.cancelled() {
-            return Err(Error::Cancelled);
-        }
-        let next = Image::open(&frames[i + 1])?;
-        let curr = Image::open(&frames[i])?;
-        let step = registration.align(&next, &curr, run)?;
-        transforms[i] = transforms[i + 1].then(step);
-        done += 1;
-        run.progress(Stage::Register, done, n - 1);
+        transforms[i] = transforms[i + 1].then(steps[i]);
     }
 
     Ok(transforms)
