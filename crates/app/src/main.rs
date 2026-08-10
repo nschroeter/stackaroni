@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use eframe::egui;
-use run::{Outcome, Run, Settings};
+use run::{Export, Outcome, Run, Settings};
 use stack::{Preview, Stack, Thumbnail};
 
 fn main() -> eframe::Result {
@@ -103,6 +103,9 @@ struct App {
     run_sequence: u64,
     /// The fused result of the last successful run, shown in place of a frame.
     result: Option<std::path::PathBuf>,
+    export: Option<Export>,
+    /// Where the last export landed, so the status bar can say so.
+    exported: Option<std::path::PathBuf>,
     /// Shared with worker threads so a superseded load can be abandoned mid-decode.
     generation: Arc<AtomicU64>,
     error: Option<String>,
@@ -163,9 +166,56 @@ impl App {
             Ok(run) => {
                 self.error = None;
                 self.result = None;
+                self.exported = None;
                 self.run = Some(run);
             }
             Err(e) => self.error = Some(format!("could not start the run: {e}")),
+        }
+    }
+
+    fn export_result(&mut self, ctx: &egui::Context) {
+        let Some(source) = self.result.clone() else {
+            return;
+        };
+        // Named after the stack, since "stackaroni-run-48612-3.tif" is not a filename
+        // anyone wants in their photo library.
+        let suggested = match &self.stack {
+            Some(stack) => format!("{}_stacked.tif", stack.name),
+            None => "stacked.tif".to_string(),
+        };
+        let Some(destination) = rfd::FileDialog::new()
+            .set_title("Save the fused image")
+            .set_file_name(suggested)
+            .add_filter("16-bit TIFF", &["tif", "tiff"])
+            .save_file()
+        else {
+            return;
+        };
+
+        self.error = None;
+        self.exported = None;
+        self.export = Some(Export::start(source, destination, ctx.clone()));
+    }
+
+    fn poll_export(&mut self, ctx: &egui::Context) {
+        let Some(export) = &mut self.export else {
+            return;
+        };
+        match export.poll() {
+            None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            Some(result) => {
+                self.export = None;
+                match result {
+                    Ok(path) => {
+                        // The result now lives where the user put it; the temp copy is
+                        // gone, so point at the new location or a later re-decode would
+                        // read a file that no longer exists.
+                        self.result = Some(path.clone());
+                        self.exported = Some(path);
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
         }
     }
 
@@ -200,6 +250,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_run(ui.ctx());
+        self.poll_export(ui.ctx());
         // Collect whatever the decoder finished since the last pass, and keep painting
         // while it works so thumbnails appear as they land rather than all at the end.
         if let Some(stack) = &mut self.stack {
@@ -293,10 +344,22 @@ impl App {
                 }
             }
 
-            ui.add_enabled(
-                !running && self.result.is_some(),
-                egui::Button::new("Export…"),
-            );
+            let exporting = self.export.is_some();
+            let label = if exporting {
+                "Exporting…"
+            } else {
+                "Export…"
+            };
+            if ui
+                .add_enabled(
+                    !running && !exporting && self.result.is_some(),
+                    egui::Button::new(label),
+                )
+                .clicked()
+            {
+                let ctx = ui.ctx().clone();
+                self.export_result(&ctx);
+            }
             ui.separator();
 
             match (&self.error, &self.stack) {
@@ -354,6 +417,23 @@ impl App {
                 if run.shared.cancel_requested() {
                     ui.label(egui::RichText::new("stopping after this frame").weak());
                 }
+            });
+            ui.add_space(2.0);
+            return;
+        }
+        if self.export.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(egui::RichText::new("exporting…").strong());
+                ui.label(egui::RichText::new("copying the result to its destination").weak());
+            });
+            ui.add_space(2.0);
+            return;
+        }
+        if let Some(path) = &self.exported {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("saved").strong());
+                ui.label(egui::RichText::new(path.display().to_string()).weak());
             });
             ui.add_space(2.0);
             return;

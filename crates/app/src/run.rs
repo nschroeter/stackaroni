@@ -36,10 +36,11 @@
 //! at startup, drop `stackaroni-*` entries in the temp directory whose pid is no longer
 //! alive.
 //!
-//! **No export.** A finished run leaves its result at a temp path
-//! (`stackaroni-run-<pid>-<n>.tif`) which nothing cleans up and no UI writes anywhere
-//! useful. `Export…` stays disabled until there is a save-as, and until then a result
-//! survives only as long as the system temp directory keeps it.
+//! **A result that is never exported is still orphaned.** [`Export`] removes the temp
+//! original once it has been copied, so an exported run leaves nothing behind — but a
+//! run the user never exports, or exports after a second run has replaced it, still
+//! leaves a ~300 MB file in the temp directory. The startup reaping described above is
+//! what covers that case; export alone does not.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -288,6 +289,78 @@ pub fn included_paths(stack: &crate::stack::Stack) -> Vec<PathBuf> {
         .filter(|f| f.included)
         .map(|f| f.path.clone())
         .collect()
+}
+
+/// Copying a finished result to wherever the user chose.
+///
+/// # Why this is threaded, which was not obvious
+///
+/// Measured on a 301 MB result, which is a normal size here:
+///
+/// | destination | time |
+/// |---|---|
+/// | same APFS volume | 465 µs |
+/// | across volumes | 337 ms |
+///
+/// The first number is misleading and nearly led to doing this inline: APFS
+/// copy-on-write means `fs::copy` *clones* rather than copies when source and
+/// destination share a volume, so it looks free. It is only free in that one case. The
+/// cross-volume figure is a real byte copy — and 893 MB/s is a fast local disk image,
+/// far better than the destinations that actually matter. An external USB drive at
+/// ~100 MB/s is ~3 s for the same file, a network share slower still, and "save the
+/// finished stack to my photo drive" is exactly the case that will be cross-volume.
+/// Anything over ~100 ms is a visible freeze, so it goes on a worker.
+///
+/// `rename` is not a shortcut either: across volumes it fails outright with
+/// `CrossesDevices`, so the copy path has to exist regardless.
+pub struct Export {
+    handle: Option<JoinHandle<()>>,
+    receiver: Receiver<std::result::Result<PathBuf, String>>,
+    outcome: Option<std::result::Result<PathBuf, String>>,
+}
+
+impl Export {
+    pub fn start(source: PathBuf, destination: PathBuf, ctx: egui::Context) -> Self {
+        let (sender, receiver) = channel();
+        let handle = std::thread::spawn(move || {
+            // Try the cheap path first: a same-volume rename is metadata only, and on
+            // APFS a same-volume copy is a clone. Both fall back to a real copy.
+            let result = match std::fs::rename(&source, &destination) {
+                Ok(()) => Ok(destination.clone()),
+                Err(_) => std::fs::copy(&source, &destination)
+                    .map(|_| {
+                        // The temp original has served its purpose; leaving it is how
+                        // the orphaned-result gap accumulates.
+                        let _ = std::fs::remove_file(&source);
+                        destination.clone()
+                    })
+                    .map_err(|e| format!("{}: {e}", destination.display())),
+            };
+            let _ = sender.send(result);
+            ctx.request_repaint();
+        });
+        Self {
+            handle: Some(handle),
+            receiver,
+            outcome: None,
+        }
+    }
+
+    /// The result, once the worker has actually exited — same discipline as [`Run`].
+    pub fn poll(&mut self) -> Option<std::result::Result<PathBuf, String>> {
+        if let Ok(outcome) = self.receiver.try_recv() {
+            self.outcome = Some(outcome);
+        }
+        if !self.handle.as_ref().is_some_and(|h| h.is_finished()) {
+            return None;
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        self.outcome
+            .take()
+            .or_else(|| Some(Err("the export thread ended without a result".into())))
+    }
 }
 
 #[cfg(test)]
