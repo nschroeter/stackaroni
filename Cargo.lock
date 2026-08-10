@@ -3067,9 +3067,12 @@ name = "stackaroni-app"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "fs4",
+ "libc",
  "rfd",
  "stackaroni-core",
  "tempfile",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

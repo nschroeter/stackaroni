@@ -35,6 +35,7 @@
 //! still costs a full run. If that becomes the bottleneck, the shape to reach for is a
 //! run over a spatial subset of every frame, not a richer single-frame preview.
 
+mod reap;
 mod run;
 mod stack;
 
@@ -53,7 +54,16 @@ fn main() -> eframe::Result {
             viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
             ..Default::default()
         },
-        Box::new(|_cc| Ok(Box::new(App::default()))),
+        Box::new(|_cc| {
+            // Before the window is doing anything else. Stale scratch from runs that
+            // died or were killed is exactly what eats the headroom the free-space
+            // check protects, so the two belong together.
+            let reaped = reap::stale(&reap::temp_root());
+            Ok(Box::new(App {
+                reaped: (reaped.entries > 0).then_some(reaped),
+                ..App::default()
+            }))
+        }),
     )
 }
 
@@ -258,6 +268,9 @@ struct App {
     /// How the preview pane is currently zoomed and panned. `None` until first shown,
     /// then kept across frame changes on purpose.
     view: Option<View>,
+    /// What a startup sweep reclaimed, if anything. Reported rather than silent, because
+    /// tens of GB disappearing without explanation is worse than a line of text.
+    reaped: Option<reap::Reaped>,
     /// Where the last export landed, so the status bar can say so.
     exported: Option<std::path::PathBuf>,
     /// Shared with worker threads so a superseded load can be abandoned mid-decode.
@@ -300,6 +313,7 @@ impl App {
 
     fn start_run(&mut self, ctx: &egui::Context) {
         let Some(stack) = &self.stack else { return };
+        let stack_info = stack.info;
         let frames = run::included_paths(stack);
         if frames.len() < 2 {
             self.error = Some("a run needs at least two included frames".into());
@@ -316,14 +330,16 @@ impl App {
             salience_radius: self.params.salience_radius,
             pyramid_floor: self.params.pyramid_floor,
         };
-        match Run::start(frames, settings, ctx.clone(), self.run_sequence) {
+        match Run::start(frames, stack_info, settings, ctx.clone(), self.run_sequence) {
             Ok(run) => {
                 self.error = None;
                 self.result = None;
                 self.exported = None;
                 self.run = Some(run);
             }
-            Err(e) => self.error = Some(format!("could not start the run: {e}")),
+            // Loud and immediate: a run that cannot fit must say so on the button
+            // press, not by quietly failing to start.
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -610,9 +626,23 @@ impl App {
                         egui::RichText::new(format!("{} thumbnails ready", stack.decoded)).weak(),
                     );
                 }
-                None => {
-                    ui.label(egui::RichText::new("Ready").weak());
-                }
+                None => match &self.reaped {
+                    Some(reaped) => {
+                        ui.label(egui::RichText::new("Ready").weak());
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "· reclaimed {:.1} GB from {} abandoned run{}",
+                                reaped.bytes as f64 / 1e9,
+                                reaped.entries,
+                                if reaped.entries == 1 { "" } else { "s" }
+                            ))
+                            .weak(),
+                        );
+                    }
+                    None => {
+                        ui.label(egui::RichText::new("Ready").weak());
+                    }
+                },
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(egui::RichText::new("no pipeline wired").weak());

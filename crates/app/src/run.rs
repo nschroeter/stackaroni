@@ -14,33 +14,24 @@
 //! `request_repaint` whenever progress moves; without it the progress bar sits frozen
 //! until unrelated input happens to trigger a pass, which looks exactly like a hang.
 //!
-//! # Known gaps, deliberately outstanding
+//! # Disk accounting
 //!
-//! **Nothing accounts for disk space, before or after a run. Build both halves
-//! together — a check alone only half-solves it.**
+//! Both halves are in place, and they were built together on purpose: a free-space
+//! check that still lets forgotten debris eat the headroom it is protecting is only
+//! half a fix.
 //!
-//! *Before:* no free-space check. The CLI already solves this with `fs4`: scratch holds
-//! one focus map and one weight plane per frame, both f32 and full resolution, so a
-//! 100-frame 50 MP stack needs ~38 GB, and it checks before starting rather than
-//! failing an hour in. The app does not, which is a regression against a sibling that
-//! got it right — a run that was never going to fit currently dies partway instead of
-//! in the first second. Same dependency, same arithmetic, wired into [`Run::start`]
-//! before the thread is spawned.
+//! *Before a run:* [`Run::start`] refuses to begin unless the temp volume has room for
+//! one focus map and one weight plane per frame, both f32 and full resolution — the
+//! same arithmetic the CLI uses, ~38 GB for a 100-frame 50 MP stack.
 //!
-//! *After:* nothing reaps kept scratch. Keeping a *failed* run's scratch is deliberate
-//! and correct — it is the case worth inspecting — but nothing ever removes it, so it
-//! accumulates silently. Found in practice on 2026-08-10: 38 GB of stale
-//! `stackaroni-<stack>-<pid>` directories from long-dead runs, plus an orphaned result
-//! from a successful one. A free-space check that still lets forgotten debris eat the
-//! headroom it is protecting is only half a fix, so reaping belongs in the same pass:
-//! at startup, drop `stackaroni-*` entries in the temp directory whose pid is no longer
-//! alive.
+//! *At startup:* [`crate::reap`] removes `stackaroni-*` temp entries whose owning
+//! process has exited. That is also what covers a result the user never exported, which
+//! [`Export`] alone cannot: export cleans up after itself, but only once it runs.
 //!
-//! **A result that is never exported is still orphaned.** [`Export`] removes the temp
-//! original once it has been copied, so an exported run leaves nothing behind — but a
-//! run the user never exports, or exports after a second run has replaced it, still
-//! leaves a ~300 MB file in the temp directory. The startup reaping described above is
-//! what covers that case; export alone does not.
+//! One thing neither counts: the fused output itself, ~300 MB beside the scratch
+//! directory. The CLI does not count it either, and against a 38 GB scratch requirement
+//! it is noise — but it is an omission rather than a decision, and a stack small enough
+//! for that to matter is a stack with room to spare anyway.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -49,9 +40,11 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread::JoinHandle;
 
 use eframe::egui;
+use fs4::available_space;
 use stackaroni_core::error::{Error, Result};
 use stackaroni_core::focus::WindowedLaplacian;
 use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
+use stackaroni_core::image::FrameInfo;
 use stackaroni_core::pipeline::{
     FocusMap, FocusMetric, Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
 };
@@ -154,22 +147,41 @@ impl Run {
     /// Spawn a run over `frames`, writing the fused result beside the scratch directory.
     pub fn start(
         frames: Vec<PathBuf>,
+        info: FrameInfo,
         settings: Settings,
         ctx: egui::Context,
         sequence: u64,
-    ) -> std::io::Result<Self> {
+    ) -> std::result::Result<Self, String> {
         let shared = Arc::new(Shared::new(ctx));
         let (sender, receiver) = channel();
 
         // Unique per run, so a previous run still tearing down cannot delete this one's
         // working files. The output sits outside it, because scratch is deleted first.
         let root = std::env::temp_dir();
+
+        // Before anything else. Scratch holds one focus map and one weight plane per
+        // frame, both f32 and full resolution — the same arithmetic the CLI uses, which
+        // is ~38 GB for a 100-frame 50 MP stack. Discovering that fifteen minutes in,
+        // with the failure landing somewhere inside the weights stage, is the outcome
+        // this exists to prevent.
+        let needed = 2 * frames.len() as u64 * info.width as u64 * info.height as u64 * 4;
+        let available = available_space(&root)
+            .map_err(|e| format!("checking free space on {}: {e}", root.display()))?;
+        if available < needed {
+            return Err(format!(
+                "not enough room to run: {:.1} GB needed for scratch, {:.1} GB free on {}",
+                needed as f64 / 1e9,
+                available as f64 / 1e9,
+                root.display()
+            ));
+        }
         let scratch = root.join(format!("stackaroni-run-{}-{sequence}", std::process::id()));
         let output = root.join(format!(
             "stackaroni-run-{}-{sequence}.tif",
             std::process::id()
         ));
-        std::fs::create_dir_all(&scratch)?;
+        std::fs::create_dir_all(&scratch)
+            .map_err(|e| format!("creating {}: {e}", scratch.display()))?;
         let (scratch_path, output_path) = (scratch.clone(), output.clone());
 
         let worker = Arc::clone(&shared);
@@ -404,7 +416,8 @@ mod tests {
             pyramid_floor: 32,
         };
         let started = Instant::now();
-        let mut run = Run::start(frames, settings, egui::Context::default(), 9001).unwrap();
+        let info = stack.probe().unwrap().info;
+        let mut run = Run::start(frames, info, settings, egui::Context::default(), 9001).unwrap();
         let (scratch, output) = (run.scratch.clone(), run.output.clone());
 
         // Wait for fusion to be a few frames in — the longest stage, and the one whose
