@@ -73,6 +73,28 @@ Tenengrad is essentially gradient-energy focus measurement, typically summed (an
 
 Rather than evaluating sharpness at only one spatial scale, a multi-scale method evaluates fine, medium and coarse structure. Gaussian and Laplacian pyramids (Burt & Adelson, 1983) are natural tools for this. Fine scales capture hairs and tiny details; coarser scales capture larger anatomical structures. This reduces the tendency of one tiny high-frequency feature to dictate the focus decision for a whole region.
 
+### T12 — built, measured, and not shipped
+
+**This section is a dead end, recorded so it is not walked twice.** The paragraph above is the argument that motivated it, and the argument still sounds right; the measurements say it does essentially nothing on this pipeline as built. The code exists in full — metric, CLI flag, UI entry, sweep test — on the unmerged branch `t12-multiscale-focus`, and is deliberately not on `main`.
+
+The literature does not supply one canonical multi-scale focus measure. What is established is the pyramid (Burt & Adelson, 1983), the measure applied at each level (Nayar & Nakagawa's modified Laplacian and its windowed sum, 1990/1994; surveyed by Pertuz, Puig & Garcia, 2013), and the practice of combining per-scale sharpness (Zhang et al.'s sum-of-Gaussian-based modified Laplacian, *Digital Signal Processing* 2020; Li et al.'s region mosaicking on Laplacian pyramids, *PLOS ONE* 13(5), 2018). What was implemented is the composition of those pieces:
+
+```text
+G_0 = luma(I),  G_{k+1} = reduce(G_k)          (binomial [1,4,6,4,1]/16, Burt & Adelson)
+F_k(x,y) = sum over window W of ( laplacian(G_k)(i,j) )^2       (the §3 measure, per level)
+F(x,y)   = F_0(x,y) + sum over k=1..S-1  d^k * expand^k(F_k)(x,y)
+```
+
+`S` is the number of scales, `d` the per-octave decay, and the window radius is the same at every level — so a level-`k` window covers `2^k` times the image area. `S = 1` reduces to §3 exactly, not approximately, which a bit-identity test pinned.
+
+**What the measurements showed** (full numbers in `docs/eval-log.md`): on `synthetic_50`, detail **0.330 at every scale count 1–5** and at every decay from 0.25 to 2.0; on `blossom`, **0.02% RMSE** against the single-scale result — 17 levels out of 65535.
+
+**Why that is a real negative and not a broken experiment**, since a flat sweep usually means the latter. The coarse levels are not inert: they contribute **48× level 0's magnitude** at five scales, their between-frame contrast *rises* with scale count (0.32 → 1.44 between the first and last frame), and **97% of fused pixels move** between one scale and five. The measure changes, the change reaches the output, and the image looks the same regardless.
+
+**The suspected cause, not established.** Levels are summed **unnormalized**, and the 48× figure is direct evidence that they are not commensurable — the discrete Laplacian's response depends on grid spacing, so `F_k` computed on a half-size level is not on the same footing as `F_0`. Scale-space theory requires normalizing derivatives by the scale before combining them (Lindeberg, *IJCV* 30(2), 1998).
+
+**Trigger for revisiting: scale-normalized levels.** That is a *different algorithm*, not a parameter fix to this one, so it starts from this documented dead end on a new branch rather than by reviving `t12-multiscale-focus`. Two things to carry forward: the combination rule was weighted-sum only (max-across-scales was scoped out of v1 and never built), and the `S = 1` bit-identity requirement is what makes any such metric comparable to the shipped one on equal terms.
+
 ## 5. Wavelet-domain stacking
 
 Wavelet transforms decompose an image into low-frequency structure and several high-frequency directional bands. Focus decisions can be made on wavelet coefficients and the result reconstructed (Li, Manjunath & Mitra, 1995). Wavelets offer good detail preservation and natural multi-scale behavior, but coefficient-selection rules and boundary handling introduce additional design choices.
