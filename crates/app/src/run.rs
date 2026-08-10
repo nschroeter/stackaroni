@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use fs4::available_space;
+use stackaroni_core::defaults;
 use stackaroni_core::error::{Error, Result};
 use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
@@ -63,6 +64,21 @@ pub struct Settings {
     pub select_fusion: bool,
     pub salience_radius: u32,
     pub pyramid_floor: u32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            registration_level: defaults::REGISTRATION_LEVEL,
+            focus_radius: defaults::FOCUS_RADIUS,
+            guide_radius: defaults::GUIDE_RADIUS,
+            guide_epsilon: defaults::GUIDE_EPSILON,
+            guide_space: defaults::GUIDE_SPACE,
+            select_fusion: defaults::SELECT_FUSION,
+            salience_radius: defaults::SALIENCE_RADIUS,
+            pyramid_floor: defaults::PYRAMID_FLOOR,
+        }
+    }
 }
 
 /// Shared between the UI thread and the worker. `RunControl` is implemented on this.
@@ -456,16 +472,7 @@ mod tests {
         let frames = stack.frames.clone();
         println!("starting a run over {} frames", frames.len());
 
-        let settings = Settings {
-            registration_level: 3,
-            focus_radius: 4,
-            guide_radius: 4,
-            guide_epsilon: 1e-4,
-            guide_space: GuideSpace::Perceptual,
-            select_fusion: true,
-            salience_radius: 2,
-            pyramid_floor: 32,
-        };
+        let settings = Settings::default();
         let started = Instant::now();
         let info = stack.probe().unwrap().info;
         let mut run = Run::start(frames, info, settings, egui::Context::default(), 9001).unwrap();

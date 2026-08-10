@@ -3,6 +3,7 @@
 //! See `docs/algorithms.md` for the algorithms each stage implements and why.
 
 pub mod debug;
+pub mod defaults;
 pub mod discovery;
 pub mod error;
 pub mod filter;

@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use fs4::available_space;
 use stackaroni_core::debug;
+use stackaroni_core::defaults;
 use stackaroni_core::discovery::{Stack, discover_stack, discover_test_set};
 use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
@@ -44,11 +45,11 @@ struct Cli {
     scratch: Option<PathBuf>,
 
     /// Pyramid level for phase correlation. Higher is coarser and faster.
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = defaults::REGISTRATION_LEVEL)]
     registration_level: u32,
 
     /// Window radius for the windowed-Laplacian focus measure.
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = defaults::FOCUS_RADIUS)]
     focus_radius: u32,
 
     /// Guided-filter radius for weight refinement.
@@ -58,19 +59,19 @@ struct Cli {
     /// through in defocused background. The best value is data-dependent — a noisy
     /// stack spreads weight further at the same radius — which is why it is exposed
     /// rather than fixed.
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = defaults::GUIDE_RADIUS)]
     guide_radius: u32,
 
     /// Guided-filter regularization. Larger smooths more.
-    #[arg(long, default_value_t = 1e-4)]
+    #[arg(long, default_value_t = defaults::GUIDE_EPSILON)]
     guide_epsilon: f32,
 
     /// Stop halving the pyramid once the coarsest level reaches this size.
-    #[arg(long, default_value_t = 32)]
+    #[arg(long, default_value_t = defaults::PYRAMID_FLOOR)]
     pyramid_floor: u32,
 
     /// Tone space the guided filter's guide image is measured in.
-    #[arg(long, value_enum, default_value_t = GuideSpaceArg::Perceptual)]
+    #[arg(long, value_enum, default_value_t = GuideSpaceArg::DEFAULT)]
     guide_space: GuideSpaceArg,
 
     /// How the pyramid levels are combined. See `docs/algorithms.md` §6b.
@@ -78,11 +79,11 @@ struct Cli {
     /// `select` is the default as of T11, on ratings across all three stacks:
     /// blossom 1 -> 5, ruler 3 -> 5, synthetic_50 5 -> 4. Reproducing an eval-log row
     /// from before the flip needs an explicit `--fusion blend`.
-    #[arg(long, value_enum, default_value_t = FusionArg::Select)]
+    #[arg(long, value_enum, default_value_t = FusionArg::DEFAULT)]
     fusion: FusionArg,
 
     /// Salience window radius for `--fusion select`. Ignored by `blend`.
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = defaults::SALIENCE_RADIUS)]
     salience_radius: u32,
 
     /// Report per-frame progress.
@@ -98,10 +99,27 @@ enum FusionArg {
     Select,
 }
 
+impl FusionArg {
+    /// Derived from `core`, not restated, so the flag cannot disagree with the default
+    /// the pipeline is tuned to.
+    const DEFAULT: Self = if defaults::SELECT_FUSION {
+        Self::Select
+    } else {
+        Self::Blend
+    };
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum GuideSpaceArg {
     Linear,
     Perceptual,
+}
+
+impl GuideSpaceArg {
+    const DEFAULT: Self = match defaults::GUIDE_SPACE {
+        GuideSpace::Linear => Self::Linear,
+        GuideSpace::Perceptual => Self::Perceptual,
+    };
 }
 
 impl From<GuideSpaceArg> for GuideSpace {

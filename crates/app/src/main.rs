@@ -269,6 +269,7 @@ const EXCLUDED_OPACITY: u8 = 150;
 
 // Bound to core's own types now that a run consumes them; they were local placeholders
 // only while nothing read them.
+use stackaroni_core::defaults;
 use stackaroni_core::weights::GuideSpace;
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -277,7 +278,8 @@ enum FusionRule {
     Select,
 }
 
-/// The handful of parameters the CLI exposes, mirrored here at their current defaults.
+/// The handful of parameters the CLI exposes, mirrored here.
+#[derive(Clone, PartialEq)]
 struct Params {
     registration_level: u32,
     focus_radius: u32,
@@ -290,16 +292,22 @@ struct Params {
 }
 
 impl Default for Params {
+    /// Taken from `core::defaults`, so the panel opens on exactly the configuration the
+    /// CLI runs and `docs/eval-log.md` scored.
     fn default() -> Self {
         Self {
-            registration_level: 3,
-            focus_radius: 4,
-            guide_radius: 4,
-            guide_epsilon: 1e-4,
-            guide_space: GuideSpace::Perceptual,
-            fusion: FusionRule::Select,
-            salience_radius: 2,
-            pyramid_floor: 32,
+            registration_level: defaults::REGISTRATION_LEVEL,
+            focus_radius: defaults::FOCUS_RADIUS,
+            guide_radius: defaults::GUIDE_RADIUS,
+            guide_epsilon: defaults::GUIDE_EPSILON,
+            guide_space: defaults::GUIDE_SPACE,
+            fusion: if defaults::SELECT_FUSION {
+                FusionRule::Select
+            } else {
+                FusionRule::Blend
+            },
+            salience_radius: defaults::SALIENCE_RADIUS,
+            pyramid_floor: defaults::PYRAMID_FLOOR,
         }
     }
 }
@@ -1108,7 +1116,22 @@ impl App {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new("Parameters").strong());
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Parameters").strong());
+                        // Right-aligned, and dead once nothing has moved: the point is
+                        // getting back to the rated configuration without having to
+                        // remember eight numbers.
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let modified = self.params != Params::default();
+                            if ui
+                                .add_enabled(modified, egui::Button::new("Reset"))
+                                .on_hover_text("Restore the defaults the pipeline is tuned to")
+                                .clicked()
+                            {
+                                self.params = Params::default();
+                            }
+                        });
+                    });
                     ui.add_space(6.0);
 
                     let p = &mut self.params;

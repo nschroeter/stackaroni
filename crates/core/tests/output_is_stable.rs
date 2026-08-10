@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use stackaroni_core::defaults;
 use stackaroni_core::discovery::discover_stack;
 use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::SelectionFusion;
@@ -28,17 +29,69 @@ use stackaroni_core::registration::{PhaseCorrelation, register_stack};
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
 
 /// The live configuration, as recorded in `docs/eval-log.md`.
+///
+/// Spelled out rather than read from `core::defaults`, because [`EXPECTED`] is only valid
+/// for these exact values — sourcing them would let a defaults edit change what is being
+/// hashed. The coupling is checked instead, by the test below.
 const REGISTRATION_LEVEL: u32 = 3;
 const FOCUS_RADIUS: u32 = 4;
 const GUIDE_RADIUS: u32 = 4;
 const GUIDE_EPSILON: f32 = 1e-4;
 const SALIENCE_RADIUS: u32 = 2;
 const PYRAMID_FLOOR: u32 = 32;
+const GUIDE_SPACE: GuideSpace = GuideSpace::Perceptual;
 
 /// Hash of the fused output for `synthetic_50` at the configuration above.
 ///
 /// Established on 2026-08-10 from the build at `0a94bd7`, before any optimisation work.
 const EXPECTED: u64 = 0x0045_5c66_dd1e_4c95;
+
+/// Is the pinned configuration still the one that ships?
+///
+/// The gate itself needs `test-data/` and is therefore `#[ignore]`d, so it never runs in
+/// CI and cannot notice this. This one needs nothing and always runs: if a default moves,
+/// the hash above stops describing the shipped pipeline, and the failure says so at the
+/// moment of the edit rather than at the next manual eval.
+#[test]
+fn the_pinned_configuration_is_still_the_shipped_one() {
+    let pinned = [
+        (
+            "registration_level",
+            REGISTRATION_LEVEL,
+            defaults::REGISTRATION_LEVEL,
+        ),
+        ("focus_radius", FOCUS_RADIUS, defaults::FOCUS_RADIUS),
+        ("guide_radius", GUIDE_RADIUS, defaults::GUIDE_RADIUS),
+        (
+            "salience_radius",
+            SALIENCE_RADIUS,
+            defaults::SALIENCE_RADIUS,
+        ),
+        ("pyramid_floor", PYRAMID_FLOOR, defaults::PYRAMID_FLOOR),
+    ];
+    for (name, pinned, shipped) in pinned {
+        assert_eq!(
+            pinned, shipped,
+            "{name} default changed to {shipped}; the hash gate still pins {pinned}. \
+             Changing a default invalidates the eval-log ratings: re-run the eval, \
+             re-establish EXPECTED, and update this file's constants together."
+        );
+    }
+    assert_eq!(
+        GUIDE_EPSILON,
+        defaults::GUIDE_EPSILON,
+        "guide_epsilon default changed"
+    );
+    assert_eq!(
+        GUIDE_SPACE,
+        defaults::GUIDE_SPACE,
+        "guide_space default changed"
+    );
+    // A compile-time failure rather than a runtime one, since it is knowable then: the
+    // gate calls `SelectionFusion` directly, so flipping this default would leave the
+    // shipped fusion rule untested rather than merely differently configured.
+    const { assert!(defaults::SELECT_FUSION, "the gate fuses by selection") }
+}
 
 /// FNV-1a, written out rather than pulled in: one dependency for sixteen bytes of state is
 /// not a trade worth making, and nothing here needs collision resistance against an
@@ -82,7 +135,7 @@ fn the_fused_output_is_byte_identical() {
         transforms,
         GUIDE_RADIUS,
         GUIDE_EPSILON,
-        GuideSpace::Perceptual,
+        GUIDE_SPACE,
         scratch.path(),
     )
     .weights(&focus_maps, &())
