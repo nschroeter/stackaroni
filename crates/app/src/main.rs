@@ -1,4 +1,4 @@
-//! Main stacking view — static layout skeleton.
+//! Main stacking view.
 //!
 //! Follows the reference layout named in `CLAUDE.md`: filmstrip of frame thumbnails on
 //! the left, large preview in the centre, parameter panel on the right. That is the
@@ -8,11 +8,26 @@
 //! Fixed panels, not `egui_dock`. A dockable layout is one more unknown and buys nothing
 //! until a fixed one is shown to be limiting in practice.
 //!
-//! Folder loading, the filmstrip and the preview are real. The parameter widgets are
-//! not: they edit local state that nothing reads, and exist so the panel has real
-//! controls at real sizes. The enums they use stay local placeholders rather than being
-//! bound to the core types they mirror, because nothing consumes them yet — they get
-//! bound when a run does.
+//! Folder loading, the filmstrip, the preview, running and export are all real, and
+//! every control in the parameter panel reaches the pipeline — nothing here is
+//! cosmetic any more.
+//!
+//! # Missing from `CLAUDE.md`'s spec for this view
+//!
+//! "Preview registration/focus-map output **on a crop** before running the full stack."
+//! Not built, and not deliberately dropped — it was missed, and this note exists so it
+//! stops being invisible.
+//!
+//! It is the highest-leverage thing left in this view. Every parameter in the panel is
+//! currently validated by committing to a full run: ~20 minutes on a 100-frame stack,
+//! for a guide radius that might be visibly wrong in the first crop. That is the cost
+//! the clause exists to remove, and it is why the panel's controls are exposed at all.
+//!
+//! The pieces already exist. `WindowedLaplacian` and `PhaseCorrelation` run per frame,
+//! `debug::write_plane` already renders a focus map for inspection, and a crop is just
+//! a band read — `Image::read_rows` over a sub-rectangle, the same call the thumbnail
+//! and preview decoders make. What is absent is a crop selector in the preview pane and
+//! somewhere to show the two outputs side by side.
 
 mod run;
 mod stack;
