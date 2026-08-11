@@ -1447,7 +1447,9 @@ mod tests {
         // The label and the trade-off sentence, so a silent copy regression is caught too.
         assert!(has(&select, defaults::FUSION.label()));
         assert!(has(&blend, FusionKind::Blend.label()));
-        assert!(has(&select, "sharpest source"));
+        // The phrase that distinguishes the current copy from what it replaced, so this
+        // asserts the new wording rather than a substring both versions happened to share.
+        assert!(has(&select, "Preserves fine, thin detail"));
         assert!(has(&blend, "Averages the sources"));
     }
 }

@@ -316,7 +316,7 @@ impl FusionKind {
         match self {
             Self::Select { .. } => {
                 "Decides each point from its own neighbourhood, taking the sharpest source \
-                 there. Resolves hairs and antennae, with slightly more grain in defocused \
+                 there. Preserves fine, thin detail, with slightly more grain in defocused \
                  background."
             }
             Self::Blend => {
