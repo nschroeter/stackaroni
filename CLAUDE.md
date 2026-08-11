@@ -49,6 +49,20 @@ implementing and why (cite the technique/paper/existing implementation).
 
 # Pipeline architecture
 
+**Four stages, and choosing an algorithm means choosing one of them.** Registration, focus
+measurement, weight estimation and fusion are separate, sequential slots. A "fusion rule" is
+one implementation of the fourth slot; picking `select` over `blend` changes nothing about
+how frames were aligned, how sharpness was measured, or how weights were refined — those
+three run identically either way, and the same holds in the other direction for any future
+registration or focus-measure alternative.
+
+This matters for two things that keep coming up. **In the UI**, an algorithm chooser belongs
+to a stage, not to the pipeline: a dropdown offering "Pyramid" as if it were a whole-pipeline
+method misdescribes what changes when you use it. **In `docs/eval-log.md`**, a row that
+swaps one stage's implementation leaves the other three stages' findings intact — which is
+why the T11 fusion rows did not invalidate the T7 guided-filter measurements, and why a
+future registration change will not invalidate any fusion rating.
+
 Keep each stage independently replaceable via traits, so different algorithms can be
 benchmarked against each other without rewriting the app:
 

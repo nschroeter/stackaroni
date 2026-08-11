@@ -10,6 +10,7 @@
 //! literal lists that happen to agree are indistinguishable from one source of truth right
 //! up until someone edits one of them.
 
+use crate::fusion::FusionKind;
 use crate::weights::GuideSpace;
 
 /// Pyramid level for phase correlation.
@@ -27,12 +28,15 @@ pub const GUIDE_EPSILON: f32 = 1e-4;
 /// Tone space the guided filter's guide image is measured in.
 pub const GUIDE_SPACE: GuideSpace = GuideSpace::Perceptual;
 
-/// Whether pyramid levels are combined by windowed selection rather than weighted blend.
+/// How pyramid levels are combined.
 ///
 /// Flipped to selection in T11; see `docs/algorithms.md` §6b.
-pub const SELECT_FUSION: bool = true;
+pub const FUSION: FusionKind = FusionKind::Select {
+    salience_radius: SALIENCE_RADIUS,
+};
 
-/// Salience window radius, read only when [`SELECT_FUSION`] is set.
+/// Salience window radius. Carried by [`FusionKind::Select`], which is the only rule
+/// that reads it.
 pub const SALIENCE_RADIUS: u32 = 2;
 
 /// Size at which the pyramid stops halving.

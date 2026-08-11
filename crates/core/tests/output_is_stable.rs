@@ -90,7 +90,7 @@ fn the_pinned_configuration_is_still_the_shipped_one() {
     // A compile-time failure rather than a runtime one, since it is knowable then: the
     // gate calls `SelectionFusion` directly, so flipping this default would leave the
     // shipped fusion rule untested rather than merely differently configured.
-    const { assert!(defaults::SELECT_FUSION, "the gate fuses by selection") }
+    const { assert!(defaults::FUSION.is_select(), "the gate fuses by selection") }
 }
 
 /// FNV-1a, written out rather than pulled in: one dependency for sixteen bytes of state is

@@ -73,6 +73,18 @@ const PLACEHOLDER_FRAMES: usize = 8;
 /// Height of a filmstrip entry. Thumbnails are fitted inside this, letterboxed.
 const THUMBNAIL_HEIGHT: f32 = 88.0;
 
+/// Fusion rules the app offers, which is deliberately a subset of [`FusionKind::ALL`].
+///
+/// `Blend` is reachable from the CLI (`--fusion blend`) and not from here. It is a real
+/// alternative with a real trade-off, but on both real test stacks it measured worse
+/// (blossom 1/5 against selection's 5/5), and the eval log has no case where anyone should
+/// choose it for a photograph. It stays available for reproducing older eval-log rows,
+/// which is a job for the headless runner, not a dropdown a photographer reads.
+///
+/// The pipeline still supports it end to end — `the_app_and_the_cli_agree_byte_for_byte`
+/// covers both rules — so restoring it here is adding it to this list, nothing more.
+const UI_FUSION_RULES: [FusionKind; 1] = [defaults::FUSION];
+
 /// Preview key for the fused result, kept clear of every real frame index.
 const RESULT_KEY: usize = usize::MAX;
 
@@ -270,37 +282,8 @@ const EXCLUDED_OPACITY: u8 = 150;
 // Bound to core's own types now that a run consumes them; they were local placeholders
 // only while nothing read them.
 use stackaroni_core::defaults;
+use stackaroni_core::fusion::FusionKind;
 use stackaroni_core::weights::GuideSpace;
-
-/// Which end-to-end method fuses the stack, named the way Zerene and Helicon name theirs:
-/// one coarse choice at the top, tuning underneath.
-///
-/// One entry today, and a combo box is still the right control for it. Every method that
-/// might join it — a depth-map approach, §8's graph-cut labelling — replaces several stages
-/// at once rather than flipping one parameter, so it needs a home above the sliders rather
-/// than among them. Naming the current one in the UI also stops "Pyramid" from being
-/// something the user has to infer from a `blend`/`select` toggle further down.
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
-enum Algorithm {
-    #[default]
-    Pyramid,
-}
-
-impl Algorithm {
-    const ALL: [Self; 1] = [Self::Pyramid];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Pyramid => "Pyramid",
-        }
-    }
-}
-
-#[derive(PartialEq, Eq, Clone, Copy)]
-enum FusionRule {
-    Blend,
-    Select,
-}
 
 /// The handful of parameters the CLI exposes, mirrored here.
 #[derive(Clone, PartialEq)]
@@ -310,8 +293,7 @@ struct Params {
     guide_radius: u32,
     guide_epsilon: f32,
     guide_space: GuideSpace,
-    fusion: FusionRule,
-    salience_radius: u32,
+    fusion: FusionKind,
     pyramid_floor: u32,
 }
 
@@ -325,12 +307,7 @@ impl Default for Params {
             guide_radius: defaults::GUIDE_RADIUS,
             guide_epsilon: defaults::GUIDE_EPSILON,
             guide_space: defaults::GUIDE_SPACE,
-            fusion: if defaults::SELECT_FUSION {
-                FusionRule::Select
-            } else {
-                FusionRule::Blend
-            },
-            salience_radius: defaults::SALIENCE_RADIUS,
+            fusion: defaults::FUSION,
             pyramid_floor: defaults::PYRAMID_FLOOR,
         }
     }
@@ -339,9 +316,6 @@ impl Default for Params {
 #[derive(Default)]
 struct App {
     selected: usize,
-    /// Held outside [`Params`], which maps field-for-field onto what a run consumes.
-    /// Nothing to pass through yet: with one method there is nothing to choose between.
-    algorithm: Algorithm,
     params: Params,
     stack: Option<Stack>,
     preview: Preview,
@@ -414,8 +388,7 @@ impl App {
             guide_radius: self.params.guide_radius,
             guide_epsilon: self.params.guide_epsilon,
             guide_space: self.params.guide_space,
-            select_fusion: self.params.fusion == FusionRule::Select,
-            salience_radius: self.params.salience_radius,
+            fusion: self.params.fusion,
             pyramid_floor: self.params.pyramid_floor,
         };
         match Run::start(frames, stack_info, settings, ctx.clone(), self.run_sequence) {
@@ -1144,19 +1117,41 @@ impl App {
                 .show(ui, |ui| {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Algorithm").strong());
-                        egui::ComboBox::from_id_salt("algorithm")
-                            .selected_text(self.algorithm.label())
+                        ui.label(egui::RichText::new("Fusion rule").strong());
+                        egui::ComboBox::from_id_salt("fusion-rule")
+                            .selected_text(self.params.fusion.label())
                             .show_ui(ui, |ui| {
-                                for choice in Algorithm::ALL {
-                                    ui.selectable_value(
-                                        &mut self.algorithm,
-                                        choice,
-                                        choice.label(),
-                                    );
+                                // Only the rules the app offers, which is not every rule
+                                // that exists. `Blend` stays CLI-only until it earns a
+                                // place here: it has no measured benefit on either real
+                                // stack, and an option nobody should pick is worse than
+                                // an option that is not there.
+                                for choice in UI_FUSION_RULES {
+                                    // Compared by rule, not by value: `Select` carries its
+                                    // salience radius, so `selectable_value`'s equality
+                                    // would call a tuned radius "not this entry" and reset
+                                    // it on click.
+                                    let selected = choice.token() == self.params.fusion.token();
+                                    if ui
+                                        .selectable_label(selected, choice.label())
+                                        .on_hover_text(choice.summary())
+                                        .clicked()
+                                        && !selected
+                                    {
+                                        self.params.fusion = choice;
+                                    }
                                 }
                             });
                     });
+                    // On screen, not only in a tooltip. Blend is a trade rather than a
+                    // worse Selection, and someone who picks it and gets a soft macro
+                    // shot needs to be able to read why without hunting for it.
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(self.params.fusion.summary())
+                            .small()
+                            .weak(),
+                    );
                     ui.add_space(6.0);
                     ui.separator();
 
@@ -1207,17 +1202,15 @@ impl App {
                     });
                     ui.add_space(8.0);
 
+                    // The rule itself lives in the combo box above; what is left here is
+                    // its parameters. The slider binds *into* the variant, so a rule
+                    // without a salience radius has no slider to draw rather than a
+                    // hidden-or-greyed one — the panel cannot disagree with the type.
                     ui.label("Fusion");
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut p.fusion, FusionRule::Blend, "blend");
-                        ui.selectable_value(&mut p.fusion, FusionRule::Select, "select");
-                    });
-                    // Only the selection rule reads this, matching the CLI, where it is
-                    // documented as ignored by `blend`.
-                    ui.add_enabled(
-                        p.fusion == FusionRule::Select,
-                        egui::Slider::new(&mut p.salience_radius, 0..=4).text("salience radius"),
-                    );
+                    if let FusionKind::Select { salience_radius } = &mut p.fusion {
+                        ui.add(egui::Slider::new(salience_radius, 0..=4).text("salience radius"));
+                    }
+                    // Not swapped: both rules build the same pyramid and both read this.
                     ui.add(egui::Slider::new(&mut p.pyramid_floor, 8..=128).text("pyramid floor"));
                 });
         });
@@ -1350,4 +1343,111 @@ fn label_in(ui: &egui::Ui, rect: egui::Rect, text: &str, color: egui::Color32) {
 fn fit(content: egui::Vec2, bounds: egui::Vec2) -> egui::Vec2 {
     let scale = (bounds.x / content.x).min(bounds.y / content.y).min(1.0);
     content * scale
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stackaroni_core::fusion::FusionKind;
+
+    /// Every string the parameter panel actually draws, for one fusion rule.
+    ///
+    /// Renders the real `parameters` method into a headless `egui::Context` and reads the
+    /// text back out of the emitted shapes. Nothing is stubbed: what this sees is what a
+    /// window would show.
+    fn panel_text(fusion: FusionKind) -> Vec<String> {
+        let mut app = App {
+            params: Params {
+                fusion,
+                ..Params::default()
+            },
+            ..App::default()
+        };
+
+        fn collect(shape: &egui::epaint::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => into.push(text.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        collect(s, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let ctx = egui::Context::default();
+        let mut found = Vec::new();
+        // Two passes: egui lays widgets out against sizes it learned on the previous
+        // frame, so the first is not representative.
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+                egui::Area::new("test".into()).show(ctx, |ui| app.parameters(ui));
+            });
+            found.clear();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut found);
+            }
+            // Font atlas updates are handed to a renderer in a real frame; there is none
+            // here, and dropping them unapplied is a panic rather than a leak.
+            output.textures_delta.clear();
+        }
+        found
+    }
+
+    /// Blend stays out of the app until it earns a place.
+    ///
+    /// Not a restatement of the constant: it is the assertion that fails, with a reason,
+    /// if someone adds the rule back to the dropdown without the measurement that would
+    /// justify it. The pipeline supports it and the CLI exposes it — this is only about
+    /// what a photographer is offered.
+    #[test]
+    fn the_app_does_not_offer_blend() {
+        assert!(
+            !UI_FUSION_RULES.contains(&FusionKind::Blend),
+            "blend measured worse on both real stacks (blossom 1/5 against 5/5); if that \
+             changed, add an eval-log row first"
+        );
+        assert!(UI_FUSION_RULES.iter().all(|r| r.is_select()));
+    }
+
+    /// Does the panel actually swap, on screen, when the rule changes?
+    ///
+    /// The byte-identical gates compare pipeline *output* and would pass whatever this
+    /// panel drew — a slider left visible under Blend, or the wrong summary, is invisible
+    /// to them. This is the only automated check that looks at what is on screen, which
+    /// is why it asserts absence as well as presence: "salience radius is still there
+    /// under Blend" is the specific failure the swap exists to prevent, and a test that
+    /// only checked Selection would never see it.
+    #[test]
+    fn the_panel_swaps_with_the_fusion_rule() {
+        let select = panel_text(defaults::FUSION);
+        let blend = panel_text(FusionKind::Blend);
+
+        let has = |texts: &[String], needle: &str| texts.iter().any(|t| t.contains(needle));
+
+        assert!(
+            has(&select, "salience radius"),
+            "Selection reads the salience radius and must offer it; panel drew {select:?}"
+        );
+        assert!(
+            !has(&blend, "salience radius"),
+            "Blend ignores the salience radius entirely, so it must not be on screen; \
+             panel drew {blend:?}"
+        );
+
+        // Shared by both constructors, so it must survive the swap in both directions.
+        for (name, texts) in [("Selection", &select), ("Blend", &blend)] {
+            assert!(
+                has(texts, "pyramid floor"),
+                "{name} builds a pyramid and reads the floor; panel drew {texts:?}"
+            );
+        }
+
+        // The label and the trade-off sentence, so a silent copy regression is caught too.
+        assert!(has(&select, defaults::FUSION.label()));
+        assert!(has(&blend, FusionKind::Blend.label()));
+        assert!(has(&select, "sharpest source"));
+        assert!(has(&blend, "Averages the sources"));
+    }
 }

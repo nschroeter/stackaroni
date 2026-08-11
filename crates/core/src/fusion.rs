@@ -233,6 +233,133 @@ pub fn reconstruct(pyramid: &[Bitmap]) -> Bitmap {
 
 /// Multi-scale blend of a whole stack under per-frame weight maps.
 ///
+/// Which fusion rule to run, and every string that names it to a user.
+///
+/// One type because there were three: a `FusionArg` in the CLI, a `FusionRule` in the app,
+/// and a `select_fusion: bool` in the app's `Settings`. They agreed, but only because a
+/// later change made all three read the same default — before that they were independent
+/// literals, and nothing checked them against each other.
+///
+/// The three strings are deliberately different from one another and all live here:
+///
+/// - [`FusionKind::token`] — `select` / `blend`, the CLI's spelling. **Frozen**:
+///   `docs/eval-log.md` cites `--fusion select` in rows that must stay reproducible.
+/// - [`FusionKind::label`] — what a photographer reads in the UI. Names the effect, not
+///   the implementation; both rules are pyramid methods and saying so helps nobody
+///   choosing between them.
+/// - [`FusionKind::summary`] — the trade-off, in one sentence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FusionKind {
+    /// Per-level selection by windowed salience (§6b). Each point is decided on its own
+    /// local evidence, which is what `salience_radius` sizes — so the parameter travels
+    /// with the variant that reads it rather than beside a rule that may ignore it.
+    Select { salience_radius: u32 },
+    /// Weighted blend of every level under the refined weight maps (§6). Takes no
+    /// parameters of its own.
+    Blend,
+}
+
+impl FusionKind {
+    pub const ALL: [Self; 2] = [
+        Self::Select {
+            salience_radius: crate::defaults::SALIENCE_RADIUS,
+        },
+        Self::Blend,
+    ];
+
+    /// Accepted CLI spellings, in [`Self::ALL`] order, so clap's possible-values list and
+    /// the parser cannot drift apart.
+    pub const TOKENS: [&'static str; 2] = ["select", "blend"];
+
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Select { .. } => Self::TOKENS[0],
+            Self::Blend => Self::TOKENS[1],
+        }
+    }
+
+    /// Parses the rule alone. Any parameters it carries arrive separately — clap sees
+    /// `--fusion` and `--salience-radius` as unrelated arguments — so this yields the
+    /// default radius and [`Self::with_salience_radius`] applies the real one afterwards.
+    pub fn from_token(token: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.token() == token)
+    }
+
+    /// Replaces the radius on a rule that has one, and is a no-op on one that does not.
+    ///
+    /// This is where "blend ignores `--salience-radius`" is enforced, rather than by a
+    /// constructor politely dropping an argument it was handed.
+    pub const fn with_salience_radius(self, radius: u32) -> Self {
+        match self {
+            Self::Select { .. } => Self::Select {
+                salience_radius: radius,
+            },
+            Self::Blend => Self::Blend,
+        }
+    }
+
+    /// Named for the *mechanism*, because that is what stays true.
+    ///
+    /// "Local" against a global alternative: the rule decides each point from its own
+    /// neighbourhood rather than committing every point to one decision made once. It
+    /// promises no outcome, and it does not collide with "select", which in this app
+    /// already means choosing frames in the filmstrip.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Select { .. } => "Local",
+            Self::Blend => "Blend",
+        }
+    }
+
+    /// One sentence on what the rule does to the photograph, shown next to the choice.
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::Select { .. } => {
+                "Decides each point from its own neighbourhood, taking the sharpest source \
+                 there. Resolves hairs and antennae, with slightly more grain in defocused \
+                 background."
+            }
+            Self::Blend => {
+                "Averages the sources together. Smoother and quieter in the background, \
+                 softer on fine detail — noticeably so on hair and antennae."
+            }
+        }
+    }
+
+    pub const fn is_select(self) -> bool {
+        matches!(self, Self::Select { .. })
+    }
+
+    /// The one place either rule is constructed.
+    ///
+    /// Takes only what *every* rule needs. Per-rule parameters ride inside the variant, so
+    /// adding a third rule with its own knobs does not widen this signature with arguments
+    /// the other two ignore.
+    pub fn build(
+        self,
+        output: &Path,
+        transforms: HashMap<PathBuf, Transform>,
+        floor: u32,
+    ) -> Box<dyn ImageFusion> {
+        match self {
+            Self::Select { salience_radius } => Box::new(SelectionFusion::new(
+                output,
+                transforms,
+                floor,
+                salience_radius,
+            )),
+            Self::Blend => Box::new(LaplacianPyramidFusion::new(output, transforms, floor)),
+        }
+    }
+}
+
+impl std::fmt::Display for FusionKind {
+    /// The CLI token, so `default_value_t` prints what the flag accepts.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.token())
+    }
+}
+
 /// Output path and transforms are injected here: [`ImageFusion::fuse`] receives only
 /// images and weights, and the result is a new file rather than one of the inputs.
 pub struct LaplacianPyramidFusion {
@@ -540,6 +667,58 @@ mod tests {
     use std::ops::Range;
 
     use super::*;
+
+    /// Every token round-trips, and the sets cannot drift apart.
+    ///
+    /// `TOKENS` feeds clap's possible-values list while `from_token` does the parsing, so
+    /// a variant added to one and not the other would give an accepted value that fails
+    /// to parse — a runtime error clap's own type system cannot catch here.
+    #[test]
+    fn fusion_tokens_round_trip() {
+        assert_eq!(FusionKind::ALL.len(), FusionKind::TOKENS.len());
+        for kind in FusionKind::ALL {
+            assert_eq!(FusionKind::from_token(kind.token()), Some(kind));
+            assert!(FusionKind::TOKENS.contains(&kind.token()));
+            assert_eq!(kind.to_string(), kind.token());
+        }
+        assert_eq!(FusionKind::from_token("Selection"), None);
+        assert_eq!(FusionKind::from_token(""), None);
+    }
+
+    /// The strings a user sees are distinct from the ones a user types.
+    ///
+    /// The CLI tokens are frozen by `docs/eval-log.md`'s reproducibility, and the labels
+    /// exist to say what changes in the photograph. Collapsing them to one string is the
+    /// obvious "simplification" that would silently break either the log or the UI.
+    #[test]
+    fn labels_and_tokens_are_separate_vocabularies() {
+        let select = FusionKind::Select { salience_radius: 2 };
+        assert_eq!(select.token(), "select");
+        assert_eq!(FusionKind::Blend.token(), "blend");
+        assert_eq!(select.label(), "Local");
+        assert_eq!(FusionKind::Blend.label(), "Blend");
+        for kind in FusionKind::ALL {
+            assert!(!kind.summary().is_empty());
+        }
+    }
+
+    /// A rule's parameters belong to the rule.
+    ///
+    /// `with_salience_radius` is where "blend ignores --salience-radius" is enforced. If
+    /// it ever silently constructed a `Select`, passing `--fusion blend --salience-radius
+    /// 4` would quietly change the fusion rule rather than the parameter.
+    #[test]
+    fn only_the_rule_that_reads_a_radius_carries_one() {
+        let tuned = FusionKind::from_token("select")
+            .unwrap()
+            .with_salience_radius(4);
+        assert_eq!(tuned, FusionKind::Select { salience_radius: 4 });
+
+        let blend = FusionKind::from_token("blend")
+            .unwrap()
+            .with_salience_radius(4);
+        assert_eq!(blend, FusionKind::Blend, "blend must not gain a parameter");
+    }
 
     fn textured(width: u32, height: u32, channels: usize) -> Bitmap {
         let mut b = Bitmap::new(width, height, channels);

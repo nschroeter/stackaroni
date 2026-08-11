@@ -45,11 +45,9 @@ use fs4::available_space;
 use stackaroni_core::defaults;
 use stackaroni_core::error::{Error, Result};
 use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
-use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
+use stackaroni_core::fusion::FusionKind;
 use stackaroni_core::image::FrameInfo;
-use stackaroni_core::pipeline::{
-    Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
-};
+use stackaroni_core::pipeline::{Image, RunControl, Stage, Transform, WeightEstimator};
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
 
@@ -61,8 +59,9 @@ pub struct Settings {
     pub guide_radius: u32,
     pub guide_epsilon: f32,
     pub guide_space: GuideSpace,
-    pub select_fusion: bool,
-    pub salience_radius: u32,
+    /// Carries its own parameters — the salience radius lives inside `Select`, so a
+    /// rule that does not read it cannot be handed one.
+    pub fusion: FusionKind,
     pub pyramid_floor: u32,
 }
 
@@ -74,8 +73,7 @@ impl Default for Settings {
             guide_radius: defaults::GUIDE_RADIUS,
             guide_epsilon: defaults::GUIDE_EPSILON,
             guide_space: defaults::GUIDE_SPACE,
-            select_fusion: defaults::SELECT_FUSION,
-            salience_radius: defaults::SALIENCE_RADIUS,
+            fusion: defaults::FUSION,
             pyramid_floor: defaults::PYRAMID_FLOOR,
         }
     }
@@ -342,20 +340,9 @@ fn pipeline(
         .map(|p| Image::open(p))
         .collect::<Result<_>>()?;
 
-    let fusion: Box<dyn ImageFusion> = if settings.select_fusion {
-        Box::new(SelectionFusion::new(
-            output,
-            by_path,
-            settings.pyramid_floor,
-            settings.salience_radius,
-        ))
-    } else {
-        Box::new(LaplacianPyramidFusion::new(
-            output,
-            by_path,
-            settings.pyramid_floor,
-        ))
-    };
+    let fusion = settings
+        .fusion
+        .build(output, by_path, settings.pyramid_floor);
     fusion.fuse(&images, &weights, run)?;
     Ok(output.to_path_buf())
 }
@@ -446,6 +433,109 @@ impl Export {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+
+    /// Do the two entry points actually produce the same image?
+    ///
+    /// ```text
+    /// cargo test --release -p stackaroni-app -- --ignored --nocapture the_app_and_the_cli_agree
+    /// ```
+    ///
+    /// `FusionKind` makes both *construct* fusion the same way, but that is the part least
+    /// likely to drift; everything around it — scratch handling, frame ordering, which
+    /// params reach which stage — is duplicated between `pipeline` here and `run` in the
+    /// CLI, and has never been compared. Byte-identical output is the only check that
+    /// covers all of it at once.
+    ///
+    /// Deliberately runs the **CLI binary as a subprocess** rather than calling `core`
+    /// twice in-process. In-process would prove the plumbing agrees with itself; this
+    /// proves the shipped artifact agrees with the app, which is the thing that has to
+    /// stay true. Both rules are checked, because a per-rule divergence is exactly what a
+    /// single-rule test would miss.
+    ///
+    /// **If this fails, one of the two paths is wrong.** Do not relax the comparison.
+    #[test]
+    #[ignore = "requires test-data/synthetic_50 and builds the CLI, run with --release"]
+    fn the_app_and_the_cli_agree_byte_for_byte() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-data/synthetic_50");
+        let Ok(stack) = stackaroni_core::discovery::discover_stack(&dir) else {
+            eprintln!("skipping: test-data/synthetic_50 not present");
+            return;
+        };
+        let info = stack.probe().unwrap().info;
+        let scratch = tempfile::tempdir().unwrap();
+
+        for (index, kind) in FusionKind::ALL.into_iter().enumerate() {
+            // The app path: the same `Run` the button drives.
+            let mut run = Run::start(
+                stack.frames.clone(),
+                info,
+                Settings {
+                    fusion: kind,
+                    ..Settings::default()
+                },
+                egui::Context::default(),
+                7100 + index as u64,
+            )
+            .unwrap();
+            let app_output = loop {
+                if let Some(outcome) = run.poll() {
+                    match outcome {
+                        Outcome::Done(path) => break path,
+                        Outcome::Failed(e) => panic!("app run failed: {e}"),
+                        Outcome::Cancelled => panic!("nothing cancelled this run"),
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+
+            // The CLI path: the real binary, invoked exactly as the eval workflow does.
+            let cli_output = scratch.path().join(format!("cli_{}.tif", kind.token()));
+            let status = std::process::Command::new(env!("CARGO"))
+                .args(["run", "--release", "-q", "-p", "stackaroni-cli", "--"])
+                .arg("--input")
+                .arg(&dir)
+                .arg("--output")
+                .arg(&cli_output)
+                .arg("--fusion")
+                .arg(kind.token())
+                .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+                .status()
+                .expect("running the CLI");
+            assert!(status.success(), "CLI exited with {status}");
+
+            let app_bytes = std::fs::read(&app_output).unwrap();
+            let cli_bytes = std::fs::read(&cli_output).unwrap();
+            println!(
+                "{}: app {} bytes, cli {} bytes",
+                kind.token(),
+                app_bytes.len(),
+                cli_bytes.len()
+            );
+            assert_eq!(
+                app_bytes.len(),
+                cli_bytes.len(),
+                "{}: outputs differ in size",
+                kind.token()
+            );
+            let differing = app_bytes
+                .iter()
+                .zip(&cli_bytes)
+                .filter(|(a, b)| a != b)
+                .count();
+            assert_eq!(
+                differing,
+                0,
+                "{}: {differing} of {} bytes differ between the app and the CLI",
+                kind.token(),
+                app_bytes.len()
+            );
+
+            let _ = std::fs::remove_file(&app_output);
+            if let Some(parent) = app_output.parent() {
+                let _ = std::fs::remove_dir_all(parent);
+            }
+        }
+    }
 
     /// Cancel a real 100-frame run partway through fusion.
     ///

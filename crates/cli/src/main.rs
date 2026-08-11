@@ -6,17 +6,16 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Parser, ValueEnum};
 use fs4::available_space;
 use stackaroni_core::debug;
 use stackaroni_core::defaults;
 use stackaroni_core::discovery::{Stack, discover_stack, discover_test_set};
 use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
-use stackaroni_core::fusion::{LaplacianPyramidFusion, SelectionFusion};
+use stackaroni_core::fusion::FusionKind;
 use stackaroni_core::grid::Grid;
-use stackaroni_core::pipeline::{
-    FocusMap, Image, ImageFusion, RunControl, Stage, Transform, WeightEstimator,
-};
+use stackaroni_core::pipeline::{FocusMap, Image, RunControl, Stage, Transform, WeightEstimator};
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
 
@@ -79,8 +78,14 @@ struct Cli {
     /// `select` is the default as of T11, on ratings across all three stacks:
     /// blossom 1 -> 5, ruler 3 -> 5, synthetic_50 5 -> 4. Reproducing an eval-log row
     /// from before the flip needs an explicit `--fusion blend`.
-    #[arg(long, value_enum, default_value_t = FusionArg::DEFAULT)]
-    fusion: FusionArg,
+    #[arg(
+        long,
+        value_name = "RULE",
+        default_value_t = defaults::FUSION,
+        value_parser = PossibleValuesParser::new(FusionKind::TOKENS)
+            .try_map(|s| FusionKind::from_token(&s).ok_or_else(|| format!("unknown fusion rule {s}"))),
+    )]
+    fusion: FusionKind,
 
     /// Salience window radius for `--fusion select`. Ignored by `blend`.
     #[arg(long, default_value_t = defaults::SALIENCE_RADIUS)]
@@ -89,24 +94,6 @@ struct Cli {
     /// Report per-frame progress.
     #[arg(long, short)]
     verbose: bool,
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
-enum FusionArg {
-    /// Weighted blend of every level under the refined weight maps.
-    Blend,
-    /// Per-level selection by windowed salience; weighted blend at the base level.
-    Select,
-}
-
-impl FusionArg {
-    /// Derived from `core`, not restated, so the flag cannot disagree with the default
-    /// the pipeline is tuned to.
-    const DEFAULT: Self = if defaults::SELECT_FUSION {
-        Self::Select
-    } else {
-        Self::Blend
-    };
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -314,19 +301,14 @@ fn pipeline(
         .iter()
         .map(|p| Image::open(p))
         .collect::<stackaroni_core::error::Result<_>>()?;
-    let fusion: Box<dyn ImageFusion> = match cli.fusion {
-        FusionArg::Blend => Box::new(LaplacianPyramidFusion::new(
-            output,
-            by_path,
-            cli.pyramid_floor,
-        )),
-        FusionArg::Select => Box::new(SelectionFusion::new(
-            output,
-            by_path,
-            cli.pyramid_floor,
-            cli.salience_radius,
-        )),
-    };
+    // `--salience-radius` is a separate argument, so the rule is parsed first and its
+    // parameter folded in here. `Blend` drops it, which is what the flag has always
+    // documented — now enforced by the type rather than by a constructor ignoring it.
+    let fusion = cli.fusion.with_salience_radius(cli.salience_radius).build(
+        output,
+        by_path,
+        cli.pyramid_floor,
+    );
     let fused = fusion.fuse(&images, &weights, &run)?;
     println!("  fuse      {:>5.0}s", step.elapsed().as_secs_f32());
 
