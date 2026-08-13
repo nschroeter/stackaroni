@@ -16,26 +16,39 @@ pub fn box_sum(data: &[f32], width: u32, height: u32, radius: u32) -> Vec<f32> {
     let mut horizontal = vec![0f32; data.len()];
     for y in 0..h {
         let row = &data[(y * w) as usize..][..w as usize];
-        let tap = |x: i64| row[x.clamp(0, w - 1) as usize];
-        let mut acc: f32 = (-r..=r).map(tap).sum();
-        for x in 0..w {
-            horizontal[(y * w + x) as usize] = acc;
-            acc -= tap(x - r);
-            acc += tap(x + r + 1);
-        }
+        sliding_sum(
+            w,
+            r,
+            |x| row[x.clamp(0, w - 1) as usize],
+            &mut horizontal,
+            y * w,
+            1,
+        );
     }
 
     let mut out = vec![0f32; data.len()];
     for x in 0..w {
-        let tap = |y: i64| horizontal[(y.clamp(0, h - 1) * w + x) as usize];
-        let mut acc: f32 = (-r..=r).map(tap).sum();
-        for y in 0..h {
-            out[(y * w + x) as usize] = acc;
-            acc -= tap(y - r);
-            acc += tap(y + r + 1);
-        }
+        sliding_sum(
+            h,
+            r,
+            |y| horizontal[(y.clamp(0, h - 1) * w + x) as usize],
+            &mut out,
+            x,
+            w,
+        );
     }
     out
+}
+
+/// One 1-D sliding sum of radius `r`: `n` outputs from `tap`, written to
+/// `out[start + i * stride]`. `tap` clamps, so the window stays full width at the edges.
+fn sliding_sum(n: i64, r: i64, tap: impl Fn(i64) -> f32, out: &mut [f32], start: i64, stride: i64) {
+    let mut acc: f32 = (-r..=r).map(&tap).sum();
+    for i in 0..n {
+        out[(start + i * stride) as usize] = acc;
+        acc -= tap(i - r);
+        acc += tap(i + r + 1);
+    }
 }
 
 /// Mean over a `(2*radius+1)` square window, edges replicated.
