@@ -18,15 +18,11 @@ use rayon::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::filter::{box_mean, mul};
-use crate::image::{FrameInfo, ScratchPlane, linear_to_srgb};
+use crate::image::{BAND_ROWS, ScratchPlane, linear_to_srgb, warp_plane};
 use crate::pipeline::{FocusMap, Image, RunControl, Stage, Transform, WeightEstimator, WeightMaps};
 
 /// Rec. 709 luma coefficients, applied to linear-light RGB.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
-
-/// Output rows per band. The guided filter needs a `2*radius` halo either side,
-/// because it runs two box passes.
-const BAND_ROWS: u32 = 256;
 
 /// Which tone space the guide image is measured in.
 ///
@@ -155,7 +151,7 @@ impl GuidedWeights {
 
         let aligned_path = self.scratch.join(format!("guide{index}.f32"));
         let mut aligned = ScratchPlane::create(&aligned_path, info.width, info.height)?;
-        warp_into(&native, &mut aligned, transform, info)?;
+        warp_plane(&native, &mut aligned, transform, info)?;
 
         drop(native);
         let _ = std::fs::remove_file(&native_path);
@@ -317,28 +313,6 @@ fn normalize(planes: &mut [ScratchPlane], run: &dyn RunControl) -> Result<()> {
                 } else {
                     1.0 / count
                 };
-            }
-        }
-        y0 += rows;
-    }
-    Ok(())
-}
-
-fn warp_into(
-    src: &ScratchPlane,
-    dst: &mut ScratchPlane,
-    transform: Transform,
-    info: FrameInfo,
-) -> Result<()> {
-    let (cx, cy) = (info.width as f32 / 2.0, info.height as f32 / 2.0);
-    let mut y0 = 0;
-    while y0 < info.height {
-        let rows = BAND_ROWS.min(info.height - y0);
-        let out = dst.rows_mut(y0, rows)?;
-        for r in 0..rows {
-            for x in 0..info.width {
-                let (sx, sy) = transform.apply(x as f32 - cx, (y0 + r) as f32 - cy);
-                out[r as usize * info.width as usize + x as usize] = src.sample(sx + cx, sy + cy);
             }
         }
         y0 += rows;

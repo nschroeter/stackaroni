@@ -19,15 +19,11 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 use crate::filter::box_sum;
-use crate::image::{FrameInfo, ScratchPlane};
+use crate::image::{BAND_ROWS, FrameInfo, ScratchPlane, warp_plane};
 use crate::pipeline::{FocusMap, FocusMetric, Image, RunControl, Stage, Transform};
 
 /// Rec. 709 luma coefficients, applied to linear-light RGB.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
-
-/// Output rows computed per pass. Keeps the working buffers to a few MB on a 50 MP
-/// frame while amortizing the halo re-read.
-const BAND_ROWS: u32 = 256;
 
 /// Windowed Laplacian energy over a `(2*radius+1)` square window.
 ///
@@ -159,30 +155,6 @@ impl FocusMetric for WindowedLaplacian {
         let _ = std::fs::remove_file(&native_path);
         Ok(aligned)
     }
-}
-
-/// Resample `src` into `dst` under `transform`, which maps anchor coordinates onto
-/// the frame's own — so each destination pixel reads straight through it.
-fn warp_plane(
-    src: &ScratchPlane,
-    dst: &mut ScratchPlane,
-    transform: Transform,
-    info: FrameInfo,
-) -> Result<()> {
-    let (cx, cy) = (info.width as f32 / 2.0, info.height as f32 / 2.0);
-    let mut y0 = 0;
-    while y0 < info.height {
-        let rows = BAND_ROWS.min(info.height - y0);
-        let out = dst.rows_mut(y0, rows)?;
-        for r in 0..rows {
-            for x in 0..info.width {
-                let (sx, sy) = transform.apply(x as f32 - cx, (y0 + r) as f32 - cy);
-                out[r as usize * info.width as usize + x as usize] = src.sample(sx + cx, sy + cy);
-            }
-        }
-        y0 += rows;
-    }
-    Ok(())
 }
 
 fn to_luma(band: &[f32], info: FrameInfo, rows: u32) -> Vec<f32> {

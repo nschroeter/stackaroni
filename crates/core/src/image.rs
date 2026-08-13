@@ -7,6 +7,11 @@ use std::path::Path;
 use memmap2::MmapMut;
 
 use crate::error::{Error, Result};
+use crate::pipeline::Transform;
+
+/// Output rows computed per banded pass. Keeps the working buffers to a few MB on a
+/// 50 MP frame while amortizing any halo re-read.
+pub const BAND_ROWS: u32 = 256;
 
 /// Shape and sample layout of one frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,6 +139,30 @@ impl ScratchPlane {
         let w = self.width as usize;
         Ok((y0 as usize * w, count as usize * w))
     }
+}
+
+/// Resample `src` into `dst` under `transform`, which maps anchor coordinates onto
+/// the frame's own — so each destination pixel reads straight through it.
+pub fn warp_plane(
+    src: &ScratchPlane,
+    dst: &mut ScratchPlane,
+    transform: Transform,
+    info: FrameInfo,
+) -> Result<()> {
+    let (cx, cy) = (info.width as f32 / 2.0, info.height as f32 / 2.0);
+    let mut y0 = 0;
+    while y0 < info.height {
+        let rows = BAND_ROWS.min(info.height - y0);
+        let out = dst.rows_mut(y0, rows)?;
+        for r in 0..rows {
+            for x in 0..info.width {
+                let (sx, sy) = transform.apply(x as f32 - cx, (y0 + r) as f32 - cy);
+                out[r as usize * info.width as usize + x as usize] = src.sample(sx + cx, sy + cy);
+            }
+        }
+        y0 += rows;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
