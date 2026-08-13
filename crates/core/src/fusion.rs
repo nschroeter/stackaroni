@@ -157,13 +157,7 @@ pub fn expand(src: &Bitmap, width: u32, height: u32) -> Bitmap {
                     let sx = o.clamp(0, src.width as i64 - 1) as usize;
                     src.data[(y * src.width as usize + sx) * c + ch]
                 };
-                for ch in 0..c {
-                    dst[x * c + ch] = if x % 2 == 0 {
-                        (tap(i - 1, ch) + 6.0 * tap(i, ch) + tap(i + 1, ch)) / 8.0
-                    } else {
-                        (tap(i, ch) + tap(i + 1, ch)) / 2.0
-                    };
-                }
+                expand_phase(&mut dst[x * c..][..c], x % 2 == 0, i, tap);
             }
         });
 
@@ -178,16 +172,22 @@ pub fn expand(src: &Bitmap, width: u32, height: u32) -> Bitmap {
                     let sy = o.clamp(0, wide.height as i64 - 1) as usize;
                     wide.data[(sy * width as usize + x) * c + ch]
                 };
-                for ch in 0..c {
-                    dst[x * c + ch] = if y % 2 == 0 {
-                        (tap(j - 1, ch) + 6.0 * tap(j, ch) + tap(j + 1, ch)) / 8.0
-                    } else {
-                        (tap(j, ch) + tap(j + 1, ch)) / 2.0
-                    };
-                }
+                expand_phase(&mut dst[x * c..][..c], y % 2 == 0, j, tap);
             }
         });
     out
+}
+
+/// One output pixel of `expand`, all channels: the even phase takes `[1,6,1]/8`
+/// centred on source index `i`, the odd phase `[1,1]/2` spanning `i` and `i+1`.
+fn expand_phase(dst: &mut [f32], even: bool, i: i64, tap: impl Fn(i64, usize) -> f32) {
+    for (ch, slot) in dst.iter_mut().enumerate() {
+        *slot = if even {
+            (tap(i - 1, ch) + 6.0 * tap(i, ch) + tap(i + 1, ch)) / 8.0
+        } else {
+            (tap(i, ch) + tap(i + 1, ch)) / 2.0
+        };
+    }
 }
 
 /// Successive reductions, finest first.
