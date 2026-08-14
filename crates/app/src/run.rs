@@ -45,10 +45,12 @@ use fs4::available_space;
 use stackaroni_core::defaults;
 use stackaroni_core::error::{Error, Result};
 use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
-use stackaroni_core::fusion::FusionKind;
 use stackaroni_core::image::FrameInfo;
-use stackaroni_core::pipeline::{Image, RunControl, Stage, Transform, WeightEstimator};
+use stackaroni_core::pipeline::{
+    Image, Method, RunControl, StackFusion, Stage, Transform, WeightEstimator,
+};
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
+use stackaroni_core::wavelet::WaveletStack;
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
 
 /// Everything the pipeline needs that the UI owns.
@@ -59,9 +61,10 @@ pub struct Settings {
     pub guide_radius: u32,
     pub guide_epsilon: f32,
     pub guide_space: GuideSpace,
-    /// Carries its own parameters — the salience radius lives inside `Select`, so a
-    /// rule that does not read it cannot be handed one.
-    pub fusion: FusionKind,
+    /// Carries its own parameters all the way down — the salience radius lives inside
+    /// `Local`'s `Select`, the consistency threshold inside `Wavelet` — so a method
+    /// that does not read a parameter cannot be handed one.
+    pub method: Method,
     pub pyramid_floor: u32,
 }
 
@@ -73,7 +76,7 @@ impl Default for Settings {
             guide_radius: defaults::GUIDE_RADIUS,
             guide_epsilon: defaults::GUIDE_EPSILON,
             guide_space: defaults::GUIDE_SPACE,
-            fusion: defaults::FUSION,
+            method: defaults::METHOD,
             pyramid_floor: defaults::PYRAMID_FLOOR,
         }
     }
@@ -322,28 +325,40 @@ fn pipeline(
         .zip(transforms.iter().copied())
         .collect();
 
-    let metric = WindowedLaplacian::new(settings.focus_radius, scratch, by_path.clone());
-    let focus_maps = evaluate_stack(&metric, frames, run)?;
-
-    let weights = GuidedWeights::new(
-        frames.to_vec(),
-        transforms,
-        settings.guide_radius,
-        settings.guide_epsilon,
-        settings.guide_space,
-        scratch,
-    )
-    .weights(&focus_maps, run)?;
-
     let images: Vec<Image> = frames
         .iter()
         .map(|p| Image::open(p))
         .collect::<Result<_>>()?;
 
-    let fusion = settings
-        .fusion
-        .build(output, by_path, settings.pyramid_floor);
-    fusion.fuse(&images, &weights, run)?;
+    // Registration above is shared by both methods; below it they diverge entirely.
+    // `Wavelet` runs no focus or weights stage — those are inside its transform, not
+    // skipped — so nothing here computes a plane it will not use.
+    match settings.method {
+        Method::Local { fusion } => {
+            let metric = WindowedLaplacian::new(settings.focus_radius, scratch, by_path.clone());
+            let focus_maps = evaluate_stack(&metric, frames, run)?;
+
+            let weights = GuidedWeights::new(
+                frames.to_vec(),
+                transforms,
+                settings.guide_radius,
+                settings.guide_epsilon,
+                settings.guide_space,
+                scratch,
+            )
+            .weights(&focus_maps, run)?;
+
+            fusion
+                .build(output, by_path, settings.pyramid_floor)
+                .fuse(&images, &weights, run)?;
+        }
+        Method::Wavelet {
+            consistency_threshold,
+        } => {
+            WaveletStack::new(output, settings.pyramid_floor, consistency_threshold, None)
+                .stack(&images, &by_path, run)?;
+        }
+    }
     Ok(output.to_path_buf())
 }
 
@@ -432,6 +447,7 @@ impl Export {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stackaroni_core::fusion::FusionKind;
     use std::time::{Duration, Instant};
 
     /// Do the two entry points actually produce the same image?
@@ -464,13 +480,42 @@ mod tests {
         let info = stack.probe().unwrap().info;
         let scratch = tempfile::tempdir().unwrap();
 
-        for (index, kind) in FusionKind::ALL.into_iter().enumerate() {
+        // Every configuration the two front ends can both reach: both fusion rules under
+        // `local`, plus `wavelet`, which takes an entirely different path through
+        // `pipeline` and so is exactly where the two could diverge unnoticed.
+        let cases: Vec<(&str, Method, Vec<&str>)> = vec![
+            (
+                "select",
+                Method::Local {
+                    fusion: FusionKind::Select {
+                        salience_radius: defaults::SALIENCE_RADIUS,
+                    },
+                },
+                vec!["--fusion", "select"],
+            ),
+            (
+                "blend",
+                Method::Local {
+                    fusion: FusionKind::Blend,
+                },
+                vec!["--fusion", "blend"],
+            ),
+            (
+                "wavelet",
+                Method::Wavelet {
+                    consistency_threshold: defaults::CONSISTENCY_THRESHOLD,
+                },
+                vec!["--method", "wavelet"],
+            ),
+        ];
+
+        for (index, (name, method, cli_args)) in cases.into_iter().enumerate() {
             // The app path: the same `Run` the button drives.
             let mut run = Run::start(
                 stack.frames.clone(),
                 info,
                 Settings {
-                    fusion: kind,
+                    method,
                     ..Settings::default()
                 },
                 egui::Context::default(),
@@ -489,15 +534,14 @@ mod tests {
             };
 
             // The CLI path: the real binary, invoked exactly as the eval workflow does.
-            let cli_output = scratch.path().join(format!("cli_{}.tif", kind.token()));
+            let cli_output = scratch.path().join(format!("cli_{name}.tif"));
             let status = std::process::Command::new(env!("CARGO"))
                 .args(["run", "--release", "-q", "-p", "stackaroni-cli", "--"])
                 .arg("--input")
                 .arg(&dir)
                 .arg("--output")
                 .arg(&cli_output)
-                .arg("--fusion")
-                .arg(kind.token())
+                .args(&cli_args)
                 .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
                 .status()
                 .expect("running the CLI");
@@ -507,7 +551,7 @@ mod tests {
             let cli_bytes = std::fs::read(&cli_output).unwrap();
             println!(
                 "{}: app {} bytes, cli {} bytes",
-                kind.token(),
+                name,
                 app_bytes.len(),
                 cli_bytes.len()
             );
@@ -515,7 +559,7 @@ mod tests {
                 app_bytes.len(),
                 cli_bytes.len(),
                 "{}: outputs differ in size",
-                kind.token()
+                name
             );
             let differing = app_bytes
                 .iter()
@@ -526,7 +570,7 @@ mod tests {
                 differing,
                 0,
                 "{}: {differing} of {} bytes differ between the app and the CLI",
-                kind.token(),
+                name,
                 app_bytes.len()
             );
 

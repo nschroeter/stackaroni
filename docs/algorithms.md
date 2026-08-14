@@ -99,6 +99,34 @@ F(x,y)   = F_0(x,y) + sum over k=1..S-1  d^k * expand^k(F_k)(x,y)
 
 Wavelet transforms decompose an image into low-frequency structure and several high-frequency directional bands. Focus decisions can be made on wavelet coefficients and the result reconstructed (Li, Manjunath & Mitra, 1995). Wavelets offer good detail preservation and natural multi-scale behavior, but coefficient-selection rules and boundary handling introduce additional design choices.
 
+### T14 — implemented as `core::wavelet`
+
+**This is the first method in the codebase that does not fit the four-stage pipeline**, and that is why it was built: focus measurement, weight estimation and fusion collapse into one operation on transform coefficients. Registration still applies. It implements `StackFusion` rather than `ImageFusion`; see the stage-boundary note in `CLAUDE.md`.
+
+**The transform.** CDF 5/3 (Cohen, Daubechies & Feauveau, 1992), by lifting (Sweldens, 1998) — the reversible pair JPEG2000 specifies (ISO/IEC 15444-1, Annex F). Two levels of choice were resolved against this project's quality checklist rather than by defaulting:
+
+- **Over Haar**, whose two-tap support makes selection-based fusion show blocking artifacts — the seam class checklist item 1 scores hardest.
+- **Over an undecimated (shift-invariant) transform**, which is 4x memory per level and is not what the paper specifies. The decimated transform is shift-variant, and consistency verification exists partly to mitigate that. **If seams appear at high-contrast edges, SWT is the documented next step** — a different transform on a new branch, not a retune of this one.
+
+Boundary handling is whole-point symmetric extension, `x[-1] = x[1]`. Clamping instead would duplicate the edge sample and inject a step the transform reads as a genuine edge, ringing all four borders of every frame. Because lifting inverts its steps one at a time, perfect reconstruction holds for *any* boundary rule as long as the inverse matches — so the extension is a quality choice, not a correctness risk, and `analysis_and_synthesis_round_trip` pins it.
+
+**Selection.** Detail coefficients are taken from whichever frame carries the most local activity, where activity is the windowed *energy* over a 3x3 area — the paper's area-based measure, not the bare coefficient magnitude. A per-coefficient argmax on ISO-1600 frames selects noise (Wang et al., 2018), the same finding that shaped §6b.
+
+Two choices make the decision joint rather than independent, both for the reason §6b gives for keeping salience joint across channels — an inconsistent selection at one location reads as fringing:
+
+- **On luminance, not per channel.** The transform is linear, so the luminance of the coefficients *is* the coefficient of the luminance; combining after the transform is exact and saves a fourth transform.
+- **Across the three orientations, not per orientation**, giving one decision per position per level rather than three.
+
+**Consistency verification, and a documented extension.** The paper filters the selection map so an isolated coefficient does not come from a different frame than its neighbourhood. It fuses **two** images, where "the majority of the 8 neighbours" is always well-defined. **With 100 frames a strict majority usually does not exist** — eight neighbours can hold eight different labels — a case the paper has no reason to address. So the filter takes the **plurality** and applies it only when it reaches `defaults::CONSISTENCY_THRESHOLD` (4 of 8). **At two frames a plurality of 5 or more is a majority, so the published rule is recovered exactly as a special case rather than replaced**, and `two_frames_reduce_to_the_published_majority` is the test holding that claim.
+
+The filter reads from a snapshot, not in place: an in-place pass propagates its own corrections and smears one label across a row.
+
+**Cost: the frames are decomposed twice.** Verification needs the whole label map before it can filter it, and the filtered labels then point at coefficients from frames already read and dropped. Keeping every frame's coefficients would be the stack itself in memory. So one pass decides and one gathers.
+
+**The approximation band is averaged across all frames**, per the paper. Note this is an extrapolation of its rule: Li et al. average the LL band of *two* images. Averaging over 100 is the most likely source of a soft or washed result and is the first place to look if the output reads flat.
+
+**Diagnostic output:** one greyscale PNG per level of the selection label map, written under `--debug-out`. A speckled map means selection is picking noise; a hard ring at the subject boundary means the opposite problem.
+
 ## 6. Laplacian-pyramid fusion
 
 Laplacian-pyramid fusion is one of the strongest candidates for this application. Instead of selecting a source image independently for every pixel, a spatially varying mask is constructed and different spatial-frequency bands are blended separately. This substantially reduces seams and abrupt transitions. The technique traces to the original Laplacian pyramid representation (Burt & Adelson, 1983) and its extension to selective image fusion (Burt & Kolczynski, 1993).

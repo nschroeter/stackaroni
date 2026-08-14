@@ -11,6 +11,7 @@
 //! up until someone edits one of them.
 
 use crate::fusion::FusionKind;
+use crate::pipeline::Method;
 use crate::weights::GuideSpace;
 
 /// Pyramid level for phase correlation.
@@ -40,4 +41,26 @@ pub const FUSION: FusionKind = FusionKind::Select {
 pub const SALIENCE_RADIUS: u32 = 2;
 
 /// Size at which the pyramid stops halving.
+///
+/// Shared by both methods: it is the depth of the multi-scale decomposition, and the
+/// wavelet path reads it too so the two are comparable at matched depth rather than at
+/// accidentally different ones.
 pub const PYRAMID_FLOOR: u32 = 32;
+
+/// Which pipeline shape runs by default.
+///
+/// Stays [`Method::Local`]: every rating in `docs/eval-log.md` was given to its output,
+/// and `tests/output_is_stable.rs` hashes it.
+pub const METHOD: Method = Method::Local { fusion: FUSION };
+
+/// How many of a coefficient's 8 neighbours must agree before consistency verification
+/// overrides its selected frame.
+///
+/// **A documented extension of the published rule, not the rule itself.** Li, Manjunath
+/// & Mitra fuse two images, where "the majority of the neighbourhood" is always defined
+/// — 5 of 8 settles it. With 100 frames, 8 neighbours can hold 8 different labels and a
+/// strict majority usually does not exist, a case the paper has no reason to address.
+/// So the filter takes the *plurality* and applies it only when it reaches this count.
+/// At 2 frames a plurality of 5 or more is a majority, so the published behaviour is
+/// recovered exactly as a special case rather than replaced.
+pub const CONSISTENCY_THRESHOLD: u32 = 4;

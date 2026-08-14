@@ -612,7 +612,7 @@ fn plane_to_bitmap(plane: &ScratchPlane) -> Result<Bitmap> {
 /// Because scale is generally not 1, the source rows a given output row needs are not
 /// a fixed offset — the range stretches as well as shifts, so it is recomputed per
 /// chunk rather than assumed.
-fn warp_frame(image: &Image, transform: Transform, info: FrameInfo) -> Result<Bitmap> {
+pub(crate) fn warp_frame(image: &Image, transform: Transform, info: FrameInfo) -> Result<Bitmap> {
     let (cx, cy) = (info.width as f32 / 2.0, info.height as f32 / 2.0);
     let mut out = Bitmap::new(info.width, info.height, 3);
     let source_y = |y: u32| transform.apply(0.0, y as f32 - cy).1 + cy;

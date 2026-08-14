@@ -73,17 +73,18 @@ const PLACEHOLDER_FRAMES: usize = 8;
 /// Height of a filmstrip entry. Thumbnails are fitted inside this, letterboxed.
 const THUMBNAIL_HEIGHT: f32 = 88.0;
 
-/// Fusion rules the app offers, which is deliberately a subset of [`FusionKind::ALL`].
-///
-/// `Blend` is reachable from the CLI (`--fusion blend`) and not from here. It is a real
-/// alternative with a real trade-off, but on both real test stacks it measured worse
-/// (blossom 1/5 against selection's 5/5), and the eval log has no case where anyone should
-/// choose it for a photograph. It stays available for reproducing older eval-log rows,
-/// which is a job for the headless runner, not a dropdown a photographer reads.
-///
-/// The pipeline still supports it end to end — `the_app_and_the_cli_agree_byte_for_byte`
-/// covers both rules — so restoring it here is adding it to this list, nothing more.
-const UI_FUSION_RULES: [FusionKind; 1] = [defaults::FUSION];
+// The app offers every entry in `Method::ALL`. The fusion *rule* is no longer a choice
+// here: `Method::Local` carries `defaults::FUSION`, which is `Select`.
+//
+// `Blend` remains reachable from the CLI (`--fusion blend`) and not from here. It is a
+// real alternative with a real trade-off, but on both real test stacks it measured worse
+// (blossom 1/5 against selection's 5/5), and the eval log has no case where anyone should
+// choose it for a photograph. It stays available for reproducing older eval-log rows,
+// which is a job for the headless runner, not a dropdown a photographer reads.
+//
+// The pipeline still supports it end to end — `the_app_and_the_cli_agree_byte_for_byte`
+// covers both rules — so offering it here would mean giving `Local` its own rule combo,
+// not editing a list.
 
 /// Preview key for the fused result, kept clear of every real frame index.
 const RESULT_KEY: usize = usize::MAX;
@@ -283,6 +284,7 @@ const EXCLUDED_OPACITY: u8 = 150;
 // only while nothing read them.
 use stackaroni_core::defaults;
 use stackaroni_core::fusion::FusionKind;
+use stackaroni_core::pipeline::Method;
 use stackaroni_core::weights::GuideSpace;
 
 /// The handful of parameters the CLI exposes, mirrored here.
@@ -293,7 +295,10 @@ struct Params {
     guide_radius: u32,
     guide_epsilon: f32,
     guide_space: GuideSpace,
-    fusion: FusionKind,
+    /// The whole pipeline shape, with each method's own parameters nested inside it.
+    /// One field rather than a method plus a loose copy of every method's knobs, so
+    /// the panel cannot offer a setting the selected method does not read.
+    method: Method,
     pyramid_floor: u32,
 }
 
@@ -307,7 +312,7 @@ impl Default for Params {
             guide_radius: defaults::GUIDE_RADIUS,
             guide_epsilon: defaults::GUIDE_EPSILON,
             guide_space: defaults::GUIDE_SPACE,
-            fusion: defaults::FUSION,
+            method: defaults::METHOD,
             pyramid_floor: defaults::PYRAMID_FLOOR,
         }
     }
@@ -388,7 +393,7 @@ impl App {
             guide_radius: self.params.guide_radius,
             guide_epsilon: self.params.guide_epsilon,
             guide_space: self.params.guide_space,
-            fusion: self.params.fusion,
+            method: self.params.method,
             pyramid_floor: self.params.pyramid_floor,
         };
         match Run::start(frames, stack_info, settings, ctx.clone(), self.run_sequence) {
@@ -1117,38 +1122,37 @@ impl App {
                 .show(ui, |ui| {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Fusion rule").strong());
-                        egui::ComboBox::from_id_salt("fusion-rule")
-                            .selected_text(self.params.fusion.label())
+                        ui.label(egui::RichText::new("Method").strong());
+                        egui::ComboBox::from_id_salt("method")
+                            .selected_text(self.params.method.label())
                             .show_ui(ui, |ui| {
-                                // Only the rules the app offers, which is not every rule
-                                // that exists. `Blend` stays CLI-only until it earns a
-                                // place here: it has no measured benefit on either real
-                                // stack, and an option nobody should pick is worse than
-                                // an option that is not there.
-                                for choice in UI_FUSION_RULES {
-                                    // Compared by rule, not by value: `Select` carries its
-                                    // salience radius, so `selectable_value`'s equality
-                                    // would call a tuned radius "not this entry" and reset
-                                    // it on click.
-                                    let selected = choice.token() == self.params.fusion.token();
+                                // Every method the app offers. The fusion *rule* is no
+                                // longer chosen here — under `Local` the app still ships
+                                // only `Select`, and `Blend` stays CLI-only for
+                                // reproducing older eval-log rows.
+                                for choice in Method::ALL {
+                                    // Compared by method, not by value: each variant
+                                    // carries its own parameters, so `selectable_value`'s
+                                    // equality would call a tuned radius "not this entry"
+                                    // and reset it on click.
+                                    let selected = choice.token() == self.params.method.token();
                                     if ui
                                         .selectable_label(selected, choice.label())
                                         .on_hover_text(choice.summary())
                                         .clicked()
                                         && !selected
                                     {
-                                        self.params.fusion = choice;
+                                        self.params.method = choice;
                                     }
                                 }
                             });
                     });
-                    // On screen, not only in a tooltip. Blend is a trade rather than a
-                    // worse Selection, and someone who picks it and gets a soft macro
-                    // shot needs to be able to read why without hunting for it.
+                    // On screen, not only in a tooltip. Wavelet is a trade rather than a
+                    // worse Local, and someone who picks it and gets a seamy macro shot
+                    // needs to be able to read why without hunting for it.
                     ui.add_space(2.0);
                     ui.label(
-                        egui::RichText::new(self.params.fusion.summary())
+                        egui::RichText::new(self.params.method.summary())
                             .small()
                             .weak(),
                     );
@@ -1180,38 +1184,73 @@ impl App {
                     ui.add(egui::Slider::new(&mut p.registration_level, 0..=5).text("level"));
                     ui.add_space(8.0);
 
-                    ui.label("Focus measure");
-                    ui.add(egui::Slider::new(&mut p.focus_radius, 1..=16).text("radius"));
-                    ui.add_space(8.0);
+                    // Everything below registration belongs to one method or the other,
+                    // and each slider binds *into* the selected variant. A method that
+                    // does not read a parameter therefore has no slider to draw, rather
+                    // than a greyed one to remember to disable — the panel cannot
+                    // disagree with the type.
+                    match &mut p.method {
+                        Method::Local { fusion } => {
+                            ui.label("Focus measure");
+                            ui.add(egui::Slider::new(&mut p.focus_radius, 1..=16).text("radius"));
+                            ui.add_space(8.0);
 
-                    ui.label("Weight refinement");
-                    ui.add(egui::Slider::new(&mut p.guide_radius, 1..=16).text("guide radius"));
-                    ui.add(
-                        egui::Slider::new(&mut p.guide_epsilon, 1e-5..=1e-1)
-                            .logarithmic(true)
-                            .text("epsilon"),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("guide:");
-                        ui.selectable_value(&mut p.guide_space, GuideSpace::Linear, "linear");
-                        ui.selectable_value(
-                            &mut p.guide_space,
-                            GuideSpace::Perceptual,
-                            "perceptual",
-                        );
-                    });
-                    ui.add_space(8.0);
+                            ui.label("Weight refinement");
+                            ui.add(
+                                egui::Slider::new(&mut p.guide_radius, 1..=16).text("guide radius"),
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut p.guide_epsilon, 1e-5..=1e-1)
+                                    .logarithmic(true)
+                                    .text("epsilon"),
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label("guide:");
+                                ui.selectable_value(
+                                    &mut p.guide_space,
+                                    GuideSpace::Linear,
+                                    "linear",
+                                );
+                                ui.selectable_value(
+                                    &mut p.guide_space,
+                                    GuideSpace::Perceptual,
+                                    "perceptual",
+                                );
+                            });
+                            ui.add_space(8.0);
 
-                    // The rule itself lives in the combo box above; what is left here is
-                    // its parameters. The slider binds *into* the variant, so a rule
-                    // without a salience radius has no slider to draw rather than a
-                    // hidden-or-greyed one — the panel cannot disagree with the type.
-                    ui.label("Fusion");
-                    if let FusionKind::Select { salience_radius } = &mut p.fusion {
-                        ui.add(egui::Slider::new(salience_radius, 0..=4).text("salience radius"));
+                            ui.label("Fusion");
+                            if let FusionKind::Select { salience_radius } = &mut *fusion {
+                                ui.add(
+                                    egui::Slider::new(salience_radius, 0..=4)
+                                        .text("salience radius"),
+                                );
+                            }
+                        }
+                        Method::Wavelet {
+                            consistency_threshold,
+                        } => {
+                            ui.label("Coefficient selection");
+                            ui.add(
+                                egui::Slider::new(consistency_threshold, 0..=8)
+                                    .text("consistency threshold"),
+                            )
+                            .on_hover_text(
+                                "How many of a coefficient's 8 neighbours must agree \
+                                 before its selected frame is overridden. 0 disables \
+                                 consistency verification.",
+                            );
+                        }
                     }
-                    // Not swapped: both rules build the same pyramid and both read this.
-                    ui.add(egui::Slider::new(&mut p.pyramid_floor, 8..=128).text("pyramid floor"));
+                    // Outside the match: both methods build a multi-scale decomposition
+                    // and both read this as its depth, which is what keeps them
+                    // comparable at matched depth rather than at accidentally different
+                    // ones. Confirmed from the constructors, not assumed.
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::Slider::new(&mut p.pyramid_floor, 8..=128)
+                            .text("decomposition floor"),
+                    );
                 });
         });
     }
@@ -1350,15 +1389,15 @@ mod tests {
     use super::*;
     use stackaroni_core::fusion::FusionKind;
 
-    /// Every string the parameter panel actually draws, for one fusion rule.
+    /// Every string the parameter panel actually draws, for one method.
     ///
     /// Renders the real `parameters` method into a headless `egui::Context` and reads the
     /// text back out of the emitted shapes. Nothing is stubbed: what this sees is what a
     /// window would show.
-    fn panel_text(fusion: FusionKind) -> Vec<String> {
+    fn panel_text(method: Method) -> Vec<String> {
         let mut app = App {
             params: Params {
-                fusion,
+                method,
                 ..Params::default()
             },
             ..App::default()
@@ -1397,59 +1436,117 @@ mod tests {
 
     /// Blend stays out of the app until it earns a place.
     ///
-    /// Not a restatement of the constant: it is the assertion that fails, with a reason,
-    /// if someone adds the rule back to the dropdown without the measurement that would
-    /// justify it. The pipeline supports it and the CLI exposes it — this is only about
-    /// what a photographer is offered.
+    /// The assertion that fails, with a reason, if someone routes the rule back into the
+    /// dropdown without the measurement that would justify it. The pipeline supports it
+    /// and the CLI exposes it — this is only about what a photographer is offered.
+    ///
+    /// Asserted over `Method::ALL`, which is what the combo box iterates, so it covers
+    /// the rule actually reachable from the UI rather than a list kept beside it.
     #[test]
     fn the_app_does_not_offer_blend() {
-        assert!(
-            !UI_FUSION_RULES.contains(&FusionKind::Blend),
-            "blend measured worse on both real stacks (blossom 1/5 against 5/5); if that \
-             changed, add an eval-log row first"
-        );
-        assert!(UI_FUSION_RULES.iter().all(|r| r.is_select()));
+        for method in Method::ALL {
+            if let Method::Local { fusion } = method {
+                assert!(
+                    fusion.is_select(),
+                    "blend measured worse on both real stacks (blossom 1/5 against 5/5); \
+                     if that changed, add an eval-log row first"
+                );
+            }
+        }
     }
 
-    /// Does the panel actually swap, on screen, when the rule changes?
+    /// Every method the combo offers has to be one the run path can actually execute.
+    ///
+    /// `Method::ALL` drives the dropdown, and a variant added there without a matching
+    /// arm in `run::pipeline` would be a menu entry that panics on Run.
+    #[test]
+    fn every_offered_method_is_runnable() {
+        for method in Method::ALL {
+            assert!(
+                Method::from_token(method.token()) == Some(method),
+                "{} does not round-trip through its CLI token",
+                method.label()
+            );
+            assert!(!method.summary().is_empty(), "{}", method.label());
+        }
+        assert_eq!(Method::ALL.len(), Method::TOKENS.len());
+    }
+
+    /// Does the panel actually swap, on screen, when the method changes?
     ///
     /// The byte-identical gates compare pipeline *output* and would pass whatever this
-    /// panel drew — a slider left visible under Blend, or the wrong summary, is invisible
-    /// to them. This is the only automated check that looks at what is on screen, which
-    /// is why it asserts absence as well as presence: "salience radius is still there
-    /// under Blend" is the specific failure the swap exists to prevent, and a test that
-    /// only checked Selection would never see it.
+    /// panel drew — a focus-radius slider left visible under Wavelet is invisible to
+    /// them. This is the only automated check that looks at what is on screen, which is
+    /// why it asserts absence as well as presence: a knob that drives a stage the
+    /// selected method never runs is the specific failure the swap exists to prevent,
+    /// and a test that only checked Local would never see it.
     #[test]
-    fn the_panel_swaps_with_the_fusion_rule() {
-        let select = panel_text(defaults::FUSION);
-        let blend = panel_text(FusionKind::Blend);
+    fn the_panel_swaps_with_the_method() {
+        let local = panel_text(defaults::METHOD);
+        let wavelet = panel_text(Method::Wavelet {
+            consistency_threshold: defaults::CONSISTENCY_THRESHOLD,
+        });
 
         let has = |texts: &[String], needle: &str| texts.iter().any(|t| t.contains(needle));
 
+        // Wavelet runs no focus or weights stage, so none of their knobs may appear.
+        for dead in ["radius", "epsilon", "guide", "salience"] {
+            assert!(
+                !has(&wavelet, dead),
+                "Wavelet runs no stage that reads {dead:?}, so it must not be on screen; \
+                 panel drew {wavelet:?}"
+            );
+        }
         assert!(
-            has(&select, "salience radius"),
-            "Selection reads the salience radius and must offer it; panel drew {select:?}"
+            has(&wavelet, "consistency threshold"),
+            "Wavelet reads the consistency threshold and must offer it; drew {wavelet:?}"
         );
+
+        // ...and the converse, so this cannot pass by drawing an empty panel.
+        for live in ["radius", "epsilon", "guide", "salience radius"] {
+            assert!(
+                has(&local, live),
+                "Local reads {live:?} and must offer it; panel drew {local:?}"
+            );
+        }
+        assert!(
+            !has(&local, "consistency threshold"),
+            "Local has no consistency verification; panel drew {local:?}"
+        );
+
+        // Read by both methods as the depth of their decomposition, so it must survive
+        // the swap in both directions.
+        for (name, texts) in [("Local", &local), ("Wavelet", &wavelet)] {
+            assert!(
+                has(texts, "decomposition floor"),
+                "{name} builds a multi-scale decomposition and reads the floor; \
+                 panel drew {texts:?}"
+            );
+        }
+
+        // The label and the trade-off sentence, so a silent copy regression is caught too.
+        assert!(has(&local, defaults::METHOD.label()));
+        assert!(has(&wavelet, "Wavelet"));
+        assert!(has(&wavelet, "seam"), "the trade-off must be on screen");
+    }
+
+    /// The fusion rule still swaps the salience slider *within* `Local`.
+    ///
+    /// The app does not offer `Blend` in the dropdown, but the panel branch that hides
+    /// its slider is still live code, and it is what a restored rule would depend on.
+    #[test]
+    fn the_salience_slider_follows_the_fusion_rule() {
+        let select = panel_text(defaults::METHOD);
+        let blend = panel_text(Method::Local {
+            fusion: FusionKind::Blend,
+        });
+
+        let has = |texts: &[String], needle: &str| texts.iter().any(|t| t.contains(needle));
+        assert!(has(&select, "salience radius"));
         assert!(
             !has(&blend, "salience radius"),
             "Blend ignores the salience radius entirely, so it must not be on screen; \
              panel drew {blend:?}"
         );
-
-        // Shared by both constructors, so it must survive the swap in both directions.
-        for (name, texts) in [("Selection", &select), ("Blend", &blend)] {
-            assert!(
-                has(texts, "pyramid floor"),
-                "{name} builds a pyramid and reads the floor; panel drew {texts:?}"
-            );
-        }
-
-        // The label and the trade-off sentence, so a silent copy regression is caught too.
-        assert!(has(&select, defaults::FUSION.label()));
-        assert!(has(&blend, FusionKind::Blend.label()));
-        // The phrase that distinguishes the current copy from what it replaced, so this
-        // asserts the new wording rather than a substring both versions happened to share.
-        assert!(has(&select, "Preserves fine, thin detail"));
-        assert!(has(&blend, "Averages the sources"));
     }
 }

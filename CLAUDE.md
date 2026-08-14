@@ -63,6 +63,28 @@ swaps one stage's implementation leaves the other three stages' findings intact 
 why the T11 fusion rows did not invalidate the T7 guided-filter measurements, and why a
 future registration change will not invalidate any fusion rating.
 
+**The stage-3/stage-4 boundary leaks, in the shipped default — know this before relying on
+the independence claim above.** `SelectionFusion::fuse` (`crates/core/src/fusion.rs:491`)
+consumes the `weights` argument for the *coarsest* pyramid level only. Every band-pass level
+is decided inside `fuse` by `select_more_salient`, which computes its own windowed salience
+over the Laplacian coefficients — so under `select`, the weight maps `GuidedWeights`
+produced barely reach the output, and fusion re-does part of stage 2's job on its own
+measure. This is not an accident to repair: local salience *is* the mechanism that took
+blossom from 1 to 5 in T11, and `select`'s decision has to be made per pyramid level, where
+a single per-frame weight plane cannot express it.
+
+Two consequences, both live. **The "swapping one stage leaves the others' findings intact"
+claim is weaker between stages 3 and 4 than it reads.** A guided-filter measurement taken
+under `blend` describes a stage whose output `select` mostly discards; T7's numbers survive
+as measurements of the weight stage, not as statements about the current fused image.
+**And a wavelet-domain or guided-filter-as-fusion method (`docs/algorithms.md` §5, §9)
+collapses stages 2-4 entirely** — there is no per-frame `FocusMap` to hand a
+`WeightEstimator`. The four traits describe the classical focus-map pipeline they were drawn
+from, and `select` is already the first implementation straining that shape. If a third
+fusion rule strains it again, the question to settle is whether the contract is "weights
+drive fusion" or "fusion may re-measure" — decide it deliberately, don't let a third
+implementation settle it by accident.
+
 Keep each stage independently replaceable via traits, so different algorithms can be
 benchmarked against each other without rewriting the app:
 
