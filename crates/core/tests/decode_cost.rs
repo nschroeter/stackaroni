@@ -86,7 +86,7 @@ fn decode_is_cpu_bound_and_scales() {
     println!("full decode, warm:{}", rate(size, warm_decode));
     println!(
         "conversion share: {:.0}% of the decode is not I/O",
-        100.0 * (warm_decode.saturating_sub(warm_read)).as_secs_f64() / warm_decode.as_secs_f64()
+        100.0 * warm_decode.saturating_sub(warm_read).as_secs_f64() / warm_decode.as_secs_f64()
     );
 
     // --- 2. the scaling, on two disjoint cold groups ---------------------------------
