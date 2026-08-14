@@ -16,3 +16,11 @@ license = "MIT"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# `opt-level = 0` makes a debug build unusable for real stacks, not merely slower: the
+# ruler stack took 43 minutes against release's 261 s, a 9.9x gap, and that reads as a
+# pipeline problem rather than as a missing `--release`. Level 2 rather than 3 keeps
+# compile times reasonable, and `debug-assertions` and overflow checks stay on, so a
+# debug build still fails loudly where a release build would not.
+[profile.dev]
+opt-level = 2
