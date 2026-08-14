@@ -22,7 +22,7 @@ use rayon::prelude::*;
 
 use crate::error::{Error, Result};
 use crate::filter::box_sum;
-use crate::image::{FrameInfo, ScratchPlane};
+use crate::image::{Coverage, FrameInfo, ScratchPlane};
 use crate::pipeline::{Image, ImageFusion, RunControl, Stage, Transform, WeightMaps};
 use crate::tiff_io::write_rgb16_srgb;
 
@@ -393,6 +393,12 @@ impl ImageFusion for LaplacianPyramidFusion {
             let seed = Bitmap::new(info.width, info.height, 3);
             gaussian_pyramid(&seed, levels)
         };
+        // Weight actually applied per level, so margin pixels — where some frames were
+        // skipped and the weights no longer sum to one — can be rescaled afterwards.
+        let mut applied: Vec<Vec<f32>> = accumulator
+            .iter()
+            .map(|b| vec![0f32; b.width as usize * b.height as usize])
+            .collect();
 
         // Per frame. This is the stage that makes cancellation worth having: ~6.2 s a
         // frame and ~10 minutes total on a 100-frame stack, against ~1.3 s a frame
@@ -418,21 +424,25 @@ impl ImageFusion for LaplacianPyramidFusion {
             let weight_bitmap = plane_to_bitmap(weight)?;
             let weight_levels = gaussian_pyramid(&weight_bitmap, levels);
 
+            let mut covered = Coverage::of(transform, info);
             for level in 0..levels {
                 let (dst, src, w) = (
                     &mut accumulator[level],
                     &bands[level],
                     &weight_levels[level],
                 );
-                for i in 0..w.data.len() {
-                    for ch in 0..3 {
-                        dst.data[i * 3 + ch] += w.data[i] * src.data[i * 3 + ch];
-                    }
-                }
+                accumulate_weighted(dst, &mut applied[level], w, src, covered);
+                covered = covered.reduced(src.width, src.height);
             }
             run.progress(Stage::Fuse, index + 1, images.len());
         }
 
+        let mut every = every_frame_covers(&self.transforms, images, info, 0);
+        for level in 0..levels {
+            let (w, h) = (accumulator[level].width, accumulator[level].height);
+            normalize_uncovered(&mut accumulator[level], &applied[level], every);
+            every = every.reduced(w, h);
+        }
         let fused = reconstruct(&accumulator);
         write_rgb16_srgb(&self.output, info, |y, row| {
             let start = y as usize * info.width as usize * 3;
@@ -508,6 +518,12 @@ impl ImageFusion for SelectionFusion {
             .iter()
             .map(|b| vec![-1.0f32; (b.width as usize) * (b.height as usize)])
             .collect();
+        // Weight actually applied at the base level, so margin pixels — where some
+        // frames were skipped and the weights no longer sum to one — can be rescaled.
+        let mut base_weight = {
+            let base = &result[levels - 1];
+            vec![0f32; base.width as usize * base.height as usize]
+        };
 
         // Per frame. This is the stage that makes cancellation worth having: ~6.2 s a
         // frame and ~10 minutes total on a 100-frame stack, against ~1.3 s a frame
@@ -527,13 +543,16 @@ impl ImageFusion for SelectionFusion {
             let bands = laplacian_pyramid(&warped, levels);
             drop(warped);
 
+            let mut covered = Coverage::of(transform, info);
             for level in 0..levels - 1 {
                 select_more_salient(
                     &mut result[level],
                     &mut best[level],
                     &bands[level],
                     self.salience_radius,
+                    covered,
                 );
+                covered = covered.reduced(bands[level].width, bands[level].height);
             }
 
             // Base level: the weight map reduced all the way down, blended as before.
@@ -543,14 +562,15 @@ impl ImageFusion for SelectionFusion {
                 w = reduce(&w);
             }
             let (dst, src) = (&mut result[levels - 1], &bands[levels - 1]);
-            for i in 0..w.data.len() {
-                for ch in 0..3 {
-                    dst.data[i * 3 + ch] += w.data[i] * src.data[i * 3 + ch];
-                }
-            }
+            accumulate_weighted(dst, &mut base_weight, &w, src, covered);
             run.progress(Stage::Fuse, index + 1, images.len());
         }
 
+        normalize_uncovered(
+            &mut result[levels - 1],
+            &base_weight,
+            every_frame_covers(&self.transforms, images, info, levels - 1),
+        );
         let fused = reconstruct(&result);
         write_rgb16_srgb(&self.output, info, |y, row| {
             let start = y as usize * info.width as usize * 3;
@@ -569,7 +589,19 @@ impl ImageFusion for SelectionFusion {
 /// draws neighbouring pixels from inconsistent sources and, on ISO-1600 frames, would
 /// routinely select noise (Wang et al., *PLOS ONE* 13(5), 2018, e0191085). The window
 /// makes an isolated spike lose to genuine surrounding structure.
-fn select_more_salient(dst: &mut Bitmap, best: &mut [f32], src: &Bitmap, radius: u32) {
+/// `covered` restricts the frame to the region it could fill without sampling outside
+/// itself. Outside that region `warp_frame` has border-replicated, and a replicated
+/// strip is constant along one axis while still carrying the border's texture along the
+/// other — so it carries real salience and would win wherever the true content is
+/// smooth. That is the frame-margin streaking of T15, and skipping those positions is
+/// the whole fix: they are not compared, so they cannot win.
+fn select_more_salient(
+    dst: &mut Bitmap,
+    best: &mut [f32],
+    src: &Bitmap,
+    radius: u32,
+    covered: Coverage,
+) {
     let n = best.len();
     let energy: Vec<f32> = (0..n)
         .map(|i| {
@@ -578,6 +610,8 @@ fn select_more_salient(dst: &mut Bitmap, best: &mut [f32], src: &Bitmap, radius:
         })
         .collect();
     let salience = box_sum(&energy, src.width, src.height, radius);
+    let full = covered.is_full(src.width, src.height);
+    let width = src.width as usize;
 
     // Each position decides for itself, so splitting them changes nothing.
     dst.data
@@ -585,12 +619,87 @@ fn select_more_salient(dst: &mut Bitmap, best: &mut [f32], src: &Bitmap, radius:
         .zip(best.par_iter_mut())
         .zip(salience.par_iter())
         .zip(src.data.par_chunks(3))
-        .for_each(|(((slot, best), &salience), source)| {
-            if salience > *best {
+        .enumerate()
+        .for_each(|(i, (((slot, best), &salience), source))| {
+            let inside = full || covered.contains((i % width) as u32, (i / width) as u32);
+            if inside && salience > *best {
                 *best = salience;
                 slot.copy_from_slice(source);
             }
         });
+}
+
+/// Add `weight * src` into `dst` over the covered region, tallying the weight applied.
+///
+/// Skipping uncovered positions is what keeps border-replicated pixels out of the
+/// result; the tally is what lets the ones that were skipped be corrected afterwards.
+fn accumulate_weighted(
+    dst: &mut Bitmap,
+    applied: &mut [f32],
+    weight: &Bitmap,
+    src: &Bitmap,
+    covered: Coverage,
+) {
+    let full = covered.is_full(dst.width, dst.height);
+    let width = dst.width as usize;
+    for (i, applied) in applied.iter_mut().enumerate() {
+        if !full && !covered.contains((i % width) as u32, (i / width) as u32) {
+            continue;
+        }
+        let w = weight.data[i];
+        *applied += w;
+        for ch in 0..3 {
+            dst.data[i * 3 + ch] += w * src.data[i * 3 + ch];
+        }
+    }
+}
+
+/// Rescale the pixels that did not receive every frame's weight, leaving the rest alone.
+///
+/// **`every` is not an optimisation, it is the correctness condition.** Inside it all
+/// frames contributed and the weights already sum to one — but only to within the
+/// rounding of a hundred additions, so dividing there would perturb pixels that no
+/// frame was ever skipped for. Confining the division to the margin is what lets an
+/// interior pixel come out bit-for-bit identical to a run without coverage tracking,
+/// and therefore what lets every rating in `docs/eval-log.md` survive this change.
+fn normalize_uncovered(dst: &mut Bitmap, applied: &[f32], every: Coverage) {
+    let width = dst.width as usize;
+    for (i, &applied) in applied.iter().enumerate() {
+        if every.contains((i % width) as u32, (i / width) as u32) {
+            continue;
+        }
+        // A pixel no frame covered cannot be recovered; leaving it is better than
+        // dividing by zero, and `Coverage::of` guarantees the anchor covers everything.
+        if applied <= 0.0 {
+            continue;
+        }
+        for ch in 0..3 {
+            dst.data[i * 3 + ch] /= applied;
+        }
+    }
+}
+
+/// The region every frame in the stack covers, at pyramid level `level`.
+fn every_frame_covers(
+    transforms: &HashMap<PathBuf, Transform>,
+    images: &[Image],
+    info: FrameInfo,
+    level: usize,
+) -> Coverage {
+    let mut every = Coverage::full(info);
+    for image in images {
+        let transform = transforms
+            .get(image.path())
+            .copied()
+            .unwrap_or(Transform::IDENTITY);
+        every = every.intersect(Coverage::of(transform, info));
+    }
+    let (mut w, mut h) = (info.width, info.height);
+    for _ in 0..level {
+        every = every.reduced(w, h);
+        (w, h) = (w.div_ceil(2), h.div_ceil(2));
+    }
+    every
 }
 
 fn plane_to_bitmap(plane: &ScratchPlane) -> Result<Bitmap> {
@@ -813,6 +922,63 @@ mod tests {
         assert!(worst < 1e-4, "should return frame a unchanged: {worst}");
     }
 
+    /// Coverage over the whole of a band — what a frame that never leaves itself has.
+    /// These tests are about salience, so they hold coverage constant.
+    fn full_cover(b: &Bitmap) -> Coverage {
+        Coverage {
+            x0: 0,
+            y0: 0,
+            x1: b.width,
+            y1: b.height,
+        }
+    }
+
+    /// The T15 fix, pinned at the level it acts on.
+    ///
+    /// A frame that had to be sampled outside itself carries border-replicated content
+    /// in the margin. That content is not flat — replication is constant along one axis
+    /// but still carries the border's texture along the other — so it wins on salience
+    /// against genuinely smooth content, which is exactly what put coloured stripes down
+    /// blossom's margins under both fusion rules. Restricting the frame to its covered
+    /// region has to stop that, and stop it *only* there: the covering frame must still
+    /// win everywhere it legitimately does.
+    #[test]
+    fn a_frame_cannot_win_outside_the_region_it_covers() {
+        let (w, h) = (32u32, 16u32);
+        let smooth = Bitmap::new(w, h, 3); // all zeros: a covering frame, no detail
+        let replicated = detail_in(0..w, w, h); // high salience everywhere
+
+        let mut dst = Bitmap::new(w, h, 3);
+        let mut best = vec![-1.0f32; (w * h) as usize];
+        select_more_salient(&mut dst, &mut best, &smooth, 1, full_cover(&smooth));
+        // This frame reaches only the left half — the right half is its replicated margin.
+        select_more_salient(
+            &mut dst,
+            &mut best,
+            &replicated,
+            1,
+            Coverage {
+                x0: 0,
+                y0: 0,
+                x1: 16,
+                y1: h,
+            },
+        );
+
+        for y in 2..h - 2 {
+            let inside = dst.index(8, y);
+            assert_eq!(
+                dst.data[inside], replicated.data[inside],
+                "inside its coverage the frame must still win, at (8,{y})"
+            );
+            let outside = dst.index(24, y);
+            assert_eq!(
+                dst.data[outside], 0.0,
+                "outside its coverage the replicated margin must not win, at (24,{y})"
+            );
+        }
+    }
+
     /// A band with checkerboard detail in one half and nothing in the other.
     fn detail_in(half: Range<u32>, width: u32, height: u32) -> Bitmap {
         let mut b = Bitmap::new(width, height, 3);
@@ -834,8 +1000,9 @@ mod tests {
 
         let mut dst = Bitmap::new(w, h, 3);
         let mut best = vec![-1.0f32; (w * h) as usize];
-        select_more_salient(&mut dst, &mut best, &left, 1);
-        select_more_salient(&mut dst, &mut best, &right, 1);
+        let cover = full_cover(&dst);
+        select_more_salient(&mut dst, &mut best, &left, 1, cover);
+        select_more_salient(&mut dst, &mut best, &right, 1, cover);
 
         // Away from the seam, each half must come from whichever source has the
         // detail there — not from an average of the two, which would halve it.
@@ -867,8 +1034,9 @@ mod tests {
 
         let mut dst = Bitmap::new(w, h, 3);
         let mut best = vec![-1.0f32; (w * h) as usize];
-        select_more_salient(&mut dst, &mut best, &blue, 1);
-        select_more_salient(&mut dst, &mut best, &broad, 1);
+        let cover = full_cover(&dst);
+        select_more_salient(&mut dst, &mut best, &blue, 1, cover);
+        select_more_salient(&mut dst, &mut best, &broad, 1, cover);
 
         // 0.48 total beats 0.36, so `broad` wins — and wins in *every* channel,
         // including blue where it is individually the weaker source.
@@ -889,8 +1057,9 @@ mod tests {
 
         let mut dst = Bitmap::new(w, h, 3);
         let mut best = vec![-1.0f32; (w * h) as usize];
-        select_more_salient(&mut dst, &mut best, &structure, 2);
-        select_more_salient(&mut dst, &mut best, &spike, 2);
+        let cover = full_cover(&dst);
+        select_more_salient(&mut dst, &mut best, &structure, 2, cover);
+        select_more_salient(&mut dst, &mut best, &spike, 2, cover);
 
         assert_eq!(
             dst.data[si], structure.data[si],
@@ -921,7 +1090,14 @@ mod tests {
         for source in [&dim, &sharp] {
             let bands = laplacian_pyramid(source, levels);
             for level in 0..levels - 1 {
-                select_more_salient(&mut result[level], &mut best[level], &bands[level], 2);
+                let cover = full_cover(&bands[level]);
+                select_more_salient(
+                    &mut result[level],
+                    &mut best[level],
+                    &bands[level],
+                    2,
+                    cover,
+                );
             }
             // All the base-level weight on the sharp frame, as the blend would give it.
             result[levels - 1] = bands[levels - 1].clone();

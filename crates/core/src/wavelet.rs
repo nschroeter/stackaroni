@@ -44,7 +44,7 @@ use rayon::prelude::*;
 use crate::error::{Error, Result};
 use crate::fusion::{level_count, warp_frame};
 use crate::grid::Grid;
-use crate::image::FrameInfo;
+use crate::image::{Coverage, FrameInfo};
 use crate::pipeline::{Image, RunControl, StackFusion, Stage, Transform};
 use crate::tiff_io::write_rgb16_srgb;
 
@@ -445,6 +445,9 @@ impl WaveletStack {
     }
 
     /// Warp one frame into anchor coordinates and decompose each colour channel.
+    ///
+    /// A frame with no entry aligns to itself — the anchor, whose transform is the
+    /// identity by construction in `register_stack`.
     fn decompose(
         &self,
         image: &Image,
@@ -498,6 +501,13 @@ impl StackFusion for WaveletStack {
             .map(|(w, h)| vec![0u16; *w as usize * *h as usize])
             .collect();
         let mut approx_sum: Option<[Plane; 3]> = None;
+        // Frames that contributed to each approximation position. Sized from the same
+        // halving `grids` uses, so it matches the approximation band whatever the
+        // stack's dimensions round to.
+        let mut approx_count = {
+            let (w, h) = grid.last().copied().unwrap_or((info.width, info.height));
+            vec![0f32; w as usize * h as usize]
+        };
 
         // --- pass 1: activity and selection --------------------------------------
         for (index, image) in images.iter().enumerate() {
@@ -506,6 +516,16 @@ impl StackFusion for WaveletStack {
             }
             let d = self.decompose(image, transforms, info, levels)?;
 
+            // Where this frame could be sampled without leaving itself. Outside it
+            // `warp_frame` border-replicated, and a replicated strip carries enough
+            // activity to win the argmax wherever the true content is smooth — the
+            // frame-margin streaking of T15. The decomposition's first level is already
+            // halved, so the coverage is reduced once before the loop.
+            let transform = transforms
+                .get(image.path())
+                .copied()
+                .unwrap_or(Transform::IDENTITY);
+            let mut covered = Coverage::of(transform, info).reduced(info.width, info.height);
             for (level, dims) in grid.iter().enumerate() {
                 let a = activity(
                     [
@@ -516,12 +536,15 @@ impl StackFusion for WaveletStack {
                     *dims,
                 );
                 let (best, labels) = (&mut best[level], &mut labels[level]);
+                let (gw, full) = (dims.0 as usize, covered.is_full(dims.0, dims.1));
                 for (i, energy) in a.iter().enumerate() {
-                    if *energy > best[i] {
+                    let inside = full || covered.contains((i % gw) as u32, (i / gw) as u32);
+                    if inside && *energy > best[i] {
                         best[i] = *energy;
                         labels[i] = index as u16;
                     }
                 }
+                covered = covered.reduced(dims.0, dims.1);
             }
 
             // The approximation band is averaged, per the paper. Accumulated here so
@@ -530,9 +553,31 @@ impl StackFusion for WaveletStack {
                 let (w, h) = (d[0].approx.width, d[0].approx.height);
                 [Plane::new(w, h), Plane::new(w, h), Plane::new(w, h)]
             });
-            for ch in 0..3 {
-                for (acc, v) in sums[ch].data.iter_mut().zip(&d[ch].approx.data) {
-                    *acc += v;
+            // Averaged over the frames that actually covered each position, not over
+            // the stack: a margin position seen by sixty frames must be divided by
+            // sixty, or it comes out darker than its neighbours by the ratio.
+            let (aw, ah) = (d[0].approx.width, d[0].approx.height);
+            // Recomputed rather than reusing the loop's `covered`, which has been
+            // reduced once past the approximation band: the band sits at `grid.len()`
+            // halvings, and the loop leaves the variable at one more than that.
+            let approx_covered = {
+                let (mut c, mut w, mut h) =
+                    (Coverage::of(transform, info), info.width, info.height);
+                for _ in 0..grid.len() {
+                    c = c.reduced(w, h);
+                    (w, h) = (w.div_ceil(2), h.div_ceil(2));
+                }
+                c
+            };
+            let full = approx_covered.is_full(aw, ah);
+            let aw = aw as usize;
+            for (i, count) in approx_count.iter_mut().enumerate() {
+                if !full && !approx_covered.contains((i % aw) as u32, (i / aw) as u32) {
+                    continue;
+                }
+                *count += 1.0;
+                for ch in 0..3 {
+                    sums[ch].data[i] += d[ch].approx.data[i];
                 }
             }
             run.progress(Stage::Focus, index + 1, images.len());
@@ -600,12 +645,15 @@ impl StackFusion for WaveletStack {
         }
 
         // --- reconstruct ----------------------------------------------------------
-        let scale = 1.0 / images.len() as f32;
         let mut approx = approx_sum.expect("a stack has at least one frame");
         let mut channels: Vec<Plane> = Vec::with_capacity(3);
         for ch in (0..3).rev() {
-            for v in approx[ch].data.iter_mut() {
-                *v *= scale;
+            for (v, &count) in approx[ch].data.iter_mut().zip(&approx_count) {
+                // Zero cannot occur — the anchor's transform is the identity and so
+                // covers everything — but dividing by it would poison the whole plane.
+                if count > 0.0 {
+                    *v /= count;
+                }
             }
             let details: Vec<Details> = out
                 .iter_mut()

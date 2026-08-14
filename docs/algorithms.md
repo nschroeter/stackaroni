@@ -262,6 +262,25 @@ For the affine step specifically, this matters because focus breathing changes a
 
 Optical flow can handle local deformation but can also behave poorly around thin hairs, antennae, transparent wings and defocused backgrounds unless strongly constrained — treat it as a later refinement, not a first implementation.
 
+### Frames that cannot fill the canvas, and why the answer is not to shrink the canvas
+
+**Added after T15.** `register_stack` chains outward from the middle frame, because focus breathing drifts monotonically across a bracket and anchoring at one end would give the far end both the largest cumulative transform and the most accumulated chaining error. That is right for accuracy, and it means the canvas is the middle frame's field of view — so every frame magnified relative to it has a *narrower* field of view than the canvas it must fill. Sampling those frames outside their own bounds hits the border-clamp in `warp_frame`, which replicates an edge pixel across the shortfall.
+
+A replicated strip is constant along one axis while still carrying the border's texture along the other, so it holds real activity and any salience- or activity-driven fusion rule will select it wherever the true content is smooth. On `blossom` (registered range 0.9495..1.0569) that produced coloured stripes ~233 px in at the sides and ~156 px at top and bottom, in both Laplacian-pyramid selection and wavelet coefficient selection.
+
+**The defect is content-dependent, and that is what determines the right fix.** `ruler` has the same magnification range (0.9535..1.0542) and the same replicated pixels, and shows no streaking at all: its margins are a textured, near-focused surface whose genuine detail outcompetes the replicated border, so the bad pixels are never selected. Only stacks with smooth margins — bokeh, sky — expose it. A geometric fix therefore taxes every stack for a defect some stacks do not have.
+
+**What was tried and rejected.** Rebasing the reference onto a canvas every frame covers — intersect the coverage rectangles, fit the canvas inside at uniform scale, re-express every transform through the fit — works, and is what Zerene's PMax appears to do (its `blossom` render is a full-size canvas at scale 0.930 against our middle-anchored one). But it costs field of view equal to *half the stack's magnification range*, because the middle anchor puts half the drift above 1.0: 5.25% on `ruler`, 5.57% on `blossom`, measured. Paying that on a stack already rated 5/5 with no visible defect is the wrong trade.
+
+**What was built instead.** Each frame carries the region it can fill without sampling outside itself — an axis-aligned rectangle, since the transform is a similarity, so four numbers rather than a mask plane. Selection skips positions outside it, so a replicated pixel is never compared and cannot win; weighted blending skips them too and rescales the affected positions by the weight that actually landed. Full field of view is kept, and the change reaches only the margin: a covered-region test costs nothing where every frame covers, which in a well-registered stack is nearly everywhere.
+
+Two implementation notes that cost real debugging:
+
+- **Trim the covered region once, at full resolution, not per pyramid level.** The 5-tap binomial filter reaches two samples, so a boundary coefficient has mixed in outside neighbours — but two coefficients at level `L` are `2·2^L` full-resolution pixels, so a per-level trim compounds geometrically and reached ~128 px by level five. On `synthetic_50`, whose registered range is 0.9994..1.0063 and whose true shortfall is ~4 px, that excluded a 120 px band of valid data and changed 48,447 pixels; trimming once brought it to 106.
+- **The margin is stacked from fewer frames, and that is visible in the statistics.** Chroma noise at the extreme edge *rises*, because fewer frames average there. Plain SD cannot tell that apart from the coherent striping it replaced — both raise it. The statistic that separates them is directional: chroma anisotropy `mean|dx|/mean|dy|` at `blossom`'s right edge moves 0.74–0.89 (coherent horizontal replication) to 1.01–1.03 (isotropic noise).
+
+Worth stating because it generalizes: any registration model that can magnify needs coverage tracked, and the more general the model the less the covered region resembles a rectangle. Under affine or homography it is a convex polygon, and the cheap rectangle test above becomes a point-in-polygon one.
+
 ## 11. Diffraction and focus measures
 
 Stopping down increases depth of field but also increases diffraction and reduces high-frequency contrast. Because a normal focus stack keeps aperture constant, this is less problematic than comparing different apertures, but it reinforces the value of robust multi-scale focus measures rather than relying on a single high-frequency metric.
