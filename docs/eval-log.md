@@ -155,6 +155,25 @@ ground-truth-warp-and-remeasure step**; the thread is closed, not paused. The me
 taken along the way stand and are still true (salience window refuted, `warp_frame`
 resampling unquantified) — they simply stop motivating work.
 
+**What is left untested, and why most of it cannot help where it sits.** Audited against
+`docs/algorithms.md` on 2026-08-16. Genuinely unbuilt and in scope: **§8 MRF / graph-cut
+weight refinement** (the executive summary rates it 5 stars) and **§3's other focus
+measures** — Tenengrad, gradient energy, local variance; only `WindowedLaplacian` exists,
+though the `FocusMetric` trait was built for exactly this. Contraindicated or out of scope:
+ECC affine (its trigger has not fired — rotation measures ≤0.124°), ORB+RANSAC (phase
+correlation works), deep learning.
+
+**Both remaining candidates sit in stages the shipped fusion rule mostly ignores, which is
+the T18 finding applied forward.** Focus maps feed the weight stage; under `select`,
+weights reach only the *coarsest* pyramid level, because every band-pass level is decided
+by `select_more_salient` from the Laplacian coefficients directly — which reads neither the
+focus measure nor the weights. Measured: swapping the entire weight family moved 931 pixels
+of 1.08M. So a graph-cut weight refiner would refine weights that barely reach the output,
+and a better focus measure would feed weights that barely reach the output. **Neither is
+worth building against `select` without first changing what consumes them.** The leverage
+is in stage 4 — the selection rule itself or its salience measure — which is also where the
+7.6-effective-frames figure is actually decided.
+
 **The search for a second method is closed (T18).** Three attempts have failed: wavelet
 2/4/2, the published DSE fix measured inert, and depth-map weights 2/3/1 — each against
 `local`'s 5/5/5, which itself beat a mature commercial PMax. **Do not start a fourth
