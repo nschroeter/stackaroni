@@ -75,6 +75,16 @@ const PLACEHOLDER_FRAMES: usize = 8;
 /// Height of a filmstrip entry. Thumbnails are fitted inside this, letterboxed.
 const THUMBNAIL_HEIGHT: f32 = 88.0;
 
+/// Width of the parameter panel.
+///
+/// Not a taste decision: the sliders stretch to fill, but each row also carries a fixed
+/// value box and a label after it, and those do not shrink. At 260 the fixed parts
+/// overflowed by ~14 px, so every row lost the end of its label — "decomposition floor"
+/// rendered as "decomposition f". `the_parameter_panel_is_wide_enough_for_its_contents`
+/// measures the real laid-out width against this and fails if a longer label is added
+/// without widening the panel.
+const PARAMETERS_PANEL_WIDTH: f32 = 320.0;
+
 // There is one pipeline and no chooser. The wavelet method was removed in T17 after
 // rating 2/4/2 against this one's 5/5/5, so `Method` went with it; the app runs
 // registration → focus → weights → pyramid fusion and nothing else.
@@ -614,9 +624,12 @@ impl eframe::App for App {
             .exact_size(150.0)
             .show(ui, |ui| self.filmstrip(ui));
 
+        // Resizable, unlike the filmstrip: the labels here are long and a person who
+        // wants them fully visible on a narrow window has no other recourse.
         egui::Panel::right("parameters")
-            .resizable(false)
-            .exact_size(260.0)
+            .resizable(true)
+            .default_size(PARAMETERS_PANEL_WIDTH)
+            .min_size(PARAMETERS_PANEL_WIDTH)
             .show(ui, |ui| self.parameters(ui));
 
         egui::CentralPanel::default().show(ui, |ui| self.preview(ui));
@@ -1452,6 +1465,64 @@ mod tests {
                 .iter()
                 .any(|t| t.to_lowercase().contains("blend")),
             "the panel must not offer blend"
+        );
+    }
+
+    /// Does every label in the parameter panel actually fit inside the panel?
+    ///
+    /// The sliders stretch to fill the panel, but each row also carries a value box and
+    /// a label that do not. At the original 260 px those fixed parts overflowed by ~14 px
+    /// and every row lost the end of its label — "decomposition floor" rendered as
+    /// "decomposition f", which is how this was found. Widening fixed it; this stops the
+    /// next long label from undoing that silently, because nothing else here would.
+    ///
+    /// Measured from the real laid-out text, not from a guess at font metrics.
+    #[test]
+    fn the_parameter_panel_is_wide_enough_for_its_contents() {
+        fn widest(width: f32) -> f32 {
+            let mut app = App::default();
+            let ctx = egui::Context::default();
+            let mut needed = 0.0f32;
+            // Two passes: egui sizes against what it learned on the previous frame.
+            for _ in 0..2 {
+                let mut out = ctx.run_ui(egui::RawInput::default(), |ctx| {
+                    egui::Area::new("fit".into()).show(ctx, |ui| {
+                        let rect = egui::Rect::from_min_size(
+                            egui::pos2(0.0, 0.0),
+                            egui::vec2(width, 900.0),
+                        );
+                        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                        app.parameters(&mut child);
+                    });
+                });
+                fn walk(s: &egui::epaint::Shape, hi: &mut f32) {
+                    match s {
+                        egui::epaint::Shape::Text(t) => *hi = hi.max(t.pos.x + t.galley.size().x),
+                        egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| walk(s, hi)),
+                        _ => {}
+                    }
+                }
+                needed = 0.0;
+                for c in &out.shapes {
+                    walk(&c.shape, &mut needed);
+                }
+                out.textures_delta.clear();
+            }
+            needed
+        }
+
+        let needed = widest(PARAMETERS_PANEL_WIDTH);
+        assert!(
+            needed <= PARAMETERS_PANEL_WIDTH,
+            "the panel is {PARAMETERS_PANEL_WIDTH} px but its contents need {needed:.0} px, \
+             so a label is being cut off; widen PARAMETERS_PANEL_WIDTH or shorten the label"
+        );
+
+        // And the check has teeth: the width this replaced must still fail it.
+        assert!(
+            widest(260.0) > 260.0,
+            "260 px used to cut labels off; if it no longer does, this test is no longer \
+             measuring what it was written to measure"
         );
     }
 
