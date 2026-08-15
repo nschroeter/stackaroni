@@ -52,6 +52,16 @@ const GUIDE_SPACE: GuideSpace = GuideSpace::Perceptual;
 /// anyway is that its change is 106 pixels out of 1.08M, all at the margin, with a 32 px
 /// inset identical — measured, not assumed. If that ever stops being the situation, the
 /// rule in this file's header applies again from the top.
+///
+/// **And on this stack the change is a small regression, not an improvement.** It has a
+/// ground truth, so it can be measured rather than rated: RMSE against
+/// `ground_truth_all_in_focus.tiff` goes 556.509 to 559.639, worst per-pixel error 17634
+/// to 21314, both entirely in the margin — the 32 px inset is 583.398 against 583.400.
+/// The cause is inherent rather than a defect: at the extreme edge the sharpest frame for
+/// a position may be one that cannot cover it, so excluding it falls back to a less sharp
+/// frame, and the sharp data does not exist at valid coordinates. It is accepted because
+/// blossom and ruler — the real stacks, the ones the rubric is for — rate 5/5 under both
+/// methods. Do not let this constant's move be read as "the output got better everywhere".
 const EXPECTED: u64 = 0xee22_e1aa_7efb_df2f;
 
 /// Is the pinned configuration still the one that ships?
