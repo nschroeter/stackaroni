@@ -95,13 +95,19 @@ struct Cli {
     #[arg(long, default_value_t = defaults::SALIENCE_RADIUS)]
     salience_radius: u32,
 
-    /// Which pipeline shape to run. See `docs/algorithms.md` §5 for `wavelet`.
+    /// Which pipeline shape to run. `local` is recommended; see `docs/algorithms.md` §5
+    /// for `wavelet`.
     ///
     /// `local` is the four-stage pipeline every row in `docs/eval-log.md` was scored
-    /// under, and stays the default. `wavelet` replaces focus measurement, weight
-    /// estimation and fusion with coefficient selection in a CDF 5/3 transform;
-    /// `--focus-radius`, `--guide-*`, `--fusion` and `--salience-radius` do not apply
-    /// to it.
+    /// under, and stays the default. It rates 5/5/5 on the test stacks.
+    ///
+    /// `wavelet` replaces focus measurement, weight estimation and fusion with
+    /// coefficient selection in a CDF 5/3 transform; `--focus-radius`, `--guide-*`,
+    /// `--fusion` and `--salience-radius` do not apply to it. It rates 2/4/2 — it
+    /// pulls colour from out-of-focus frames into smooth backgrounds near a subject's
+    /// edge (the defocus spread effect), which textured backgrounds hide and smooth
+    /// ones do not. Kept because it is the worked example of a method the four-stage
+    /// decomposition cannot express, not because it is an equal alternative.
     #[arg(
         long,
         value_name = "METHOD",

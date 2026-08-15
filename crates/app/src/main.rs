@@ -1548,7 +1548,22 @@ mod tests {
         // The label and the trade-off sentence, so a silent copy regression is caught too.
         assert!(has(&local, defaults::METHOD.label()));
         assert!(has(&wavelet, "Wavelet"));
-        assert!(has(&wavelet, "seam"), "the trade-off must be on screen");
+        // The rating and the mechanism, not a particular phrase: the two methods are not
+        // peers, and a chooser that offers them as equals is the thing this guards
+        // against. Was "seam" until 2026-08-15, when wavelet was re-rated 2/4/2 and the
+        // trade-off became the defocus spread effect rather than seaming.
+        assert!(
+            has(&wavelet, "2/4/2"),
+            "wavelet's rating must be on screen; panel drew {wavelet:?}"
+        );
+        assert!(
+            has(&wavelet, "defocus spread"),
+            "wavelet's trade-off must be on screen; panel drew {wavelet:?}"
+        );
+        assert!(
+            has(&local, "5/5/5"),
+            "local's rating must be on screen; panel drew {local:?}"
+        );
     }
 
     /// The fusion rule still swaps the salience slider *within* `Local`.

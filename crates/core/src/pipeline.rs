@@ -230,6 +230,7 @@ pub trait ImageFusion: Sync {
 /// [`ImageFusion`], because the quantities it decides on live in a coefficient domain
 /// that neither type can represent.
 ///
+///
 /// **Registration is deliberately still outside.** It is the one stage every method
 /// shares — a wavelet decomposition of unregistered frames is as wrong as a pyramid of
 /// them — so the driver aligns first and hands the transforms in. That keeps a
@@ -300,14 +301,20 @@ impl Method {
         }
     }
 
+    /// Both summaries carry the ratings, because the two methods are *not* peers and a
+    /// chooser that implies they are is the misleading part. Ratings are Niels's, on the
+    /// clean test set of 2026-08-15; `docs/eval-log.md` has that row.
     pub fn summary(self) -> &'static str {
         match self {
             Self::Local { .. } => {
-                "Laplacian pyramid with edge-aware weights. Rated 5/5/4 on the test stacks."
+                "Laplacian pyramid with edge-aware weights. Rated 5/5/5 on the test \
+                 stacks — the recommended choice."
             }
             Self::Wavelet { .. } => {
-                "Wavelet-coefficient selection. Sharper band separation, but the \
-                 decimated transform can seam at high-contrast edges."
+                "Wavelet-coefficient selection. Rated 2/4/2: it draws colour from \
+                 out-of-focus frames into smooth backgrounds near a subject's edge \
+                 (defocus spread). Usable where the background is textured; otherwise \
+                 prefer Local."
             }
         }
     }
