@@ -913,45 +913,38 @@ impl App {
             ui.add_space(2.0);
             return;
         }
-        ui.horizontal(|ui| {
-            match &self.stack {
-                Some(stack) if stack.is_loading() => {
-                    ui.spinner();
+        ui.horizontal(|ui| match &self.stack {
+            Some(stack) if stack.is_loading() => {
+                ui.spinner();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "decoding thumbnails {}/{}",
+                        stack.decoded,
+                        stack.frames.len()
+                    ))
+                    .weak(),
+                );
+            }
+            Some(stack) => {
+                ui.label(egui::RichText::new(format!("{} thumbnails ready", stack.decoded)).weak());
+            }
+            None => match &self.reaped {
+                Some(reaped) => {
+                    ui.label(egui::RichText::new("Ready").weak());
                     ui.label(
                         egui::RichText::new(format!(
-                            "decoding thumbnails {}/{}",
-                            stack.decoded,
-                            stack.frames.len()
+                            "· reclaimed {:.1} GB from {} abandoned run{}",
+                            reaped.bytes as f64 / 1e9,
+                            reaped.entries,
+                            if reaped.entries == 1 { "" } else { "s" }
                         ))
                         .weak(),
                     );
                 }
-                Some(stack) => {
-                    ui.label(
-                        egui::RichText::new(format!("{} thumbnails ready", stack.decoded)).weak(),
-                    );
+                None => {
+                    ui.label(egui::RichText::new("Ready").weak());
                 }
-                None => match &self.reaped {
-                    Some(reaped) => {
-                        ui.label(egui::RichText::new("Ready").weak());
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "· reclaimed {:.1} GB from {} abandoned run{}",
-                                reaped.bytes as f64 / 1e9,
-                                reaped.entries,
-                                if reaped.entries == 1 { "" } else { "s" }
-                            ))
-                            .weak(),
-                        );
-                    }
-                    None => {
-                        ui.label(egui::RichText::new("Ready").weak());
-                    }
-                },
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new("no pipeline wired").weak());
-            });
+            },
         });
         ui.add_space(2.0);
     }
