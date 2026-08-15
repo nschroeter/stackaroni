@@ -59,6 +59,58 @@ pub fn ensure_output_outside_stack(output: &Path, stack_dir: &Path) -> Result<()
     Ok(())
 }
 
+/// Compare two filenames treating runs of digits as numbers.
+///
+/// `frame_2` before `frame_10`, and `frame_002` before `frame_010`, from the same rule.
+/// Non-digit stretches compare byte-wise, which is what the previous plain sort did for
+/// the whole name.
+///
+/// Leading zeros are stripped before comparing, then longer digit runs are the larger
+/// number and equal-length runs compare byte-wise. That avoids parsing into an integer,
+/// so a filename carrying a forty-digit run cannot overflow anything — it just sorts.
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0usize, 0usize);
+
+    while i < a.len() && j < b.len() {
+        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+            let run = |s: &[u8], from: usize| {
+                let mut to = from;
+                while to < s.len() && s[to].is_ascii_digit() {
+                    to += 1;
+                }
+                to
+            };
+            let (ai, bj) = (run(a, i), run(b, j));
+            fn strip(s: &[u8]) -> &[u8] {
+                let mut k = 0;
+                while k + 1 < s.len() && s[k] == b'0' {
+                    k += 1;
+                }
+                &s[k..]
+            }
+            let (na, nb) = (strip(&a[i..ai]), strip(&b[j..bj]));
+
+            let ordering = na.len().cmp(&nb.len()).then_with(|| na.cmp(nb));
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+            (i, j) = (ai, bj);
+        } else {
+            let ordering = a[i].cmp(&b[j]);
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    // One is a prefix of the other, or they matched apart from zero padding.
+    (a.len() - i).cmp(&(b.len() - j))
+}
+
 /// A directory of frames, in stacking order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Stack {
@@ -76,10 +128,16 @@ pub struct StackProbe {
 
 /// Collect the frames in one stack directory.
 ///
-/// Frames are sorted lexicographically, which is also numeric order here because
-/// every stack uses zero-padded indices. Naming is otherwise not assumed to be
-/// consistent between stacks — `ruler/` uses `A1_00001_01.tif` where `blossom/`
-/// uses `A1_00001.tif`.
+/// Sorted in *natural* order — digit runs compared as numbers, everything else by
+/// bytes — so `frame_2` precedes `frame_10` whether or not the numbering is padded.
+/// Naming is otherwise not assumed to be consistent between stacks: `ruler/` uses
+/// `A1_00001_01.tif` where `blossom/` uses `A1_00001.tif`.
+///
+/// **This order is the focus order**, which is why it is worth more than tidiness.
+/// Registration chains outward from the middle frame on the assumption that adjacent
+/// files are adjacent focus positions; a stack in the wrong order does not fail, it
+/// produces a badly aligned image. Plain lexicographic sorting gave that outcome for any
+/// unpadded stack — `frame_10` before `frame_2` — silently.
 pub fn discover_stack(dir: &Path) -> Result<Stack> {
     let mut frames = Vec::new();
     let entries = std::fs::read_dir(dir).map_err(|e| Error::io(dir, e))?;
@@ -90,7 +148,18 @@ pub fn discover_stack(dir: &Path) -> Result<Stack> {
             frames.push(path);
         }
     }
-    frames.sort();
+    frames.sort_by(|a, b| {
+        let key = |p: &Path| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        // The full path breaks ties, so `frame_1` and `frame_001` — numerically equal —
+        // still land in a stable, repeatable order rather than whichever the filesystem
+        // happened to hand back.
+        natural_cmp(&key(a), &key(b)).then_with(|| a.cmp(b))
+    });
 
     if frames.is_empty() {
         return Err(Error::NoFrames {
@@ -262,6 +331,100 @@ mod tests {
                 output.display()
             );
         }
+    }
+
+    /// The case the old sort got wrong: unpadded numbering.
+    #[test]
+    fn natural_order_puts_frame_2_before_frame_10() {
+        let mut names = vec![
+            "frame_10.tif",
+            "frame_1.tif",
+            "frame_100.tif",
+            "frame_2.tif",
+        ];
+        names.sort_by(|a, b| natural_cmp(a, b));
+        assert_eq!(
+            names,
+            [
+                "frame_1.tif",
+                "frame_2.tif",
+                "frame_10.tif",
+                "frame_100.tif"
+            ]
+        );
+        // The plain sort this replaced would have produced the wrong answer, which is
+        // what makes the change worth having.
+        let mut lexicographic = names.clone();
+        lexicographic.sort();
+        assert_ne!(lexicographic, names);
+    }
+
+    /// **Padded stacks must sort exactly as before.** Every rating in `docs/eval-log.md`
+    /// was given to output produced from these orderings, and `output_is_stable` hashes
+    /// one of them — so a natural sort that reordered a padded stack would silently
+    /// invalidate the lot.
+    #[test]
+    fn padded_stacks_sort_identically_to_the_old_lexicographic_order() {
+        for pattern in ["A1_{:05}.tif", "A1_{:05}_01.tif", "frame_{:03}.tiff"] {
+            let names: Vec<String> = (1..=120)
+                .map(|i| {
+                    pattern
+                        .replace("{:05}", &format!("{i:05}"))
+                        .replace("{:03}", &format!("{i:03}"))
+                })
+                .collect();
+
+            let mut natural = names.clone();
+            natural.sort_by(|a, b| natural_cmp(a, b));
+            let mut lexicographic = names.clone();
+            lexicographic.sort();
+
+            assert_eq!(natural, lexicographic, "pattern {pattern}");
+            assert_eq!(
+                natural, names,
+                "pattern {pattern} should already be in order"
+            );
+        }
+    }
+
+    /// Mixed padding is numerically ambiguous; it must still be a total order rather
+    /// than whatever the filesystem returned, or two runs of the same folder could
+    /// stack in different orders.
+    #[test]
+    fn equal_numbers_with_different_padding_order_deterministically() {
+        use std::cmp::Ordering;
+        assert_eq!(natural_cmp("frame_1.tif", "frame_001.tif"), Ordering::Equal);
+
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["f_2.tif", "f_002.tif", "f_10.tif"] {
+            write_tiff(&dir.path().join(name), 4, 4);
+        }
+        let first = discover_stack(dir.path()).unwrap().frames;
+        let second = discover_stack(dir.path()).unwrap().frames;
+        assert_eq!(first, second, "repeated discovery must agree");
+        assert!(
+            first.last().unwrap().ends_with("f_10.tif"),
+            "10 sorts last whatever the padding: {first:?}"
+        );
+    }
+
+    /// Names with no digits at all fall back to the byte comparison the old sort used.
+    #[test]
+    fn names_without_digits_keep_byte_order() {
+        let mut names = vec!["zulu.tif", "alpha.tif", "Mike.tif"];
+        names.sort_by(|a, b| natural_cmp(a, b));
+        let mut expected = names.clone();
+        expected.sort();
+        assert_eq!(names, expected);
+    }
+
+    /// A digit run longer than any integer type must sort rather than overflow.
+    #[test]
+    fn absurdly_long_digit_runs_do_not_overflow() {
+        use std::cmp::Ordering;
+        let long = format!("f_{}.tif", "9".repeat(40));
+        let longer = format!("f_{}.tif", "9".repeat(41));
+        assert_eq!(natural_cmp(&long, &longer), Ordering::Less);
     }
 
     #[test]

@@ -76,18 +76,17 @@ decoding and denoising are deliberately out of scope. Samples are converted to l
 light on decode and re-encoded to sRGB on write.
 
 **One folder per stack, and the filenames set the order.** Every frame of a stack lives in
-its own directory, and frames are sorted *lexicographically* by filename — that order is
-taken to be the focus order.
+its own directory, and frames are sorted in *natural* order — runs of digits compared as
+numbers, everything else by bytes. That order is taken to be the focus order.
 
-**Number them with zero padding.** `frame_001.tif … frame_100.tif` sorts correctly;
-`frame_1.tif … frame_100.tif` does not, because `frame_10` sorts before `frame_2`.
+So `frame_1.tif … frame_100.tif` and `frame_001.tif … frame_100.tif` both work: `frame_2`
+comes before `frame_10` either way. Padding is not required, and mixed padding still gives
+a stable, repeatable order.
 
-**There is no fallback for this, and nothing warns you.** There is no natural-number sort
-and no attempt to infer order from EXIF or focus distance — a badly padded stack is simply
-stacked in the wrong order. It will not error, it will produce a bad result: registration
-chains outward from the middle frame on the assumption that neighbouring files are
-neighbouring focus positions, so scrambling that order scrambles the alignment. Cameras and
-tethering software pad by default, which is why this has never bitten in practice.
+**What is *not* inferred:** nothing reads EXIF or focus distance. If the filenames do not
+run in focus order, neither will the stack, and it will not complain — registration chains
+outward from the middle frame assuming adjacent files are adjacent focus positions, so a
+scrambled order produces a badly aligned image rather than an error.
 
 **Keep other TIFFs out of the folder.** Any `.tif`/`.tiff` in the directory is treated as a
 frame, apart from a short list of known non-frames. Saving a fused result next to its own
