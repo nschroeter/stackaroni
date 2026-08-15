@@ -39,6 +39,7 @@ mod reap;
 mod run;
 mod stack;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -411,6 +412,66 @@ impl App {
         }
     }
 
+    /// Errors as a modal that has to be dismissed, not a line in the status bar.
+    ///
+    /// The status line was there and was not enough: the export refusal drew into it and
+    /// read as passive text next to the stack name, which is a poor way to say "the thing
+    /// you just asked for did not happen". Every error here reports a *user action that
+    /// did not take effect* — a folder that would not load, a run that failed, an export
+    /// that was refused — so acknowledging it is the point.
+    ///
+    /// One presentation for all of them rather than a special case for the refusal:
+    /// a second error channel would be a second thing to keep in sync, and none of these
+    /// is more dismissible than the others.
+    fn error_modal(&mut self, ctx: &egui::Context) {
+        let Some(message) = self.error.clone() else {
+            return;
+        };
+        let response = egui::Modal::new(egui::Id::new("error-modal")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.heading("That did not work");
+            ui.add_space(8.0);
+            ui.label(message);
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                // Right-aligned, where the confirming button belongs on every platform
+                // this ships to.
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.button("OK").clicked()
+                })
+                .inner
+            })
+            .inner
+        });
+
+        // Escape and a click outside dismiss it too, which `should_close` folds in.
+        if response.inner || response.should_close() {
+            self.error = None;
+        }
+    }
+
+    /// Why this export must not happen, if it must not.
+    ///
+    /// Refused rather than warned about: saving a result beside the frames it came from
+    /// corrupts the stack for every later run, invisibly. The result has the frames'
+    /// geometry, so it is simply stacked as an extra frame, and the only symptom is a
+    /// frame count. Not hypothetical — the suggested filename in [`Self::export_result`]
+    /// is exactly what landed in `test-data/blossom` and `test-data/ruler`, and went
+    /// unnoticed through several runs and a full round of ratings.
+    ///
+    /// The directory comes from a frame rather than a stored field, because the frames
+    /// are what is being protected: their own location is the authoritative answer and
+    /// cannot drift from it.
+    ///
+    /// Split out from the dialog so it can be tested. The dialog itself cannot be driven
+    /// here, so without this the app's half of the guard would rest on inspection alone.
+    fn refusal_for(stack: Option<&stack::Stack>, destination: &Path) -> Option<String> {
+        let dir = stack?.frames.first()?.path.parent()?;
+        ensure_output_outside_stack(destination, dir)
+            .err()
+            .map(|e| e.to_string())
+    }
+
     fn export_result(&mut self, ctx: &egui::Context) {
         let Some(source) = self.result.clone() else {
             return;
@@ -430,23 +491,8 @@ impl App {
             return;
         };
 
-        // Refused rather than warned about: saving here corrupts the stack for every
-        // later run, invisibly — the result has the frames' geometry, so it is simply
-        // stacked as an extra frame, and the only symptom is the frame count. This is
-        // not hypothetical; the default filename below is what landed in
-        // `test-data/blossom` and `test-data/ruler` and went unnoticed through several
-        // runs and a rating.
-        // Taken from a frame rather than stored separately: the frames are what the
-        // guard is protecting, so their own directory is the authoritative answer and
-        // cannot drift from it.
-        if let Some(dir) = self
-            .stack
-            .as_ref()
-            .and_then(|s| s.frames.first())
-            .and_then(|f| f.path.parent())
-            && let Err(e) = ensure_output_outside_stack(&destination, dir)
-        {
-            self.error = Some(e.to_string());
+        if let Some(refusal) = Self::refusal_for(self.stack.as_ref(), &destination) {
+            self.error = Some(refusal);
             return;
         }
 
@@ -526,6 +572,7 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_run(ui.ctx());
         self.poll_export(ui.ctx());
+        self.error_modal(ui.ctx());
         // Collect whatever the decoder finished since the last pass, and keep painting
         // while it works so thumbnails appear as they land rather than all at the end.
         if let Some(stack) = &mut self.stack {
@@ -1491,6 +1538,117 @@ mod tests {
             assert!(!method.summary().is_empty(), "{}", method.label());
         }
         assert_eq!(Method::ALL.len(), Method::TOKENS.len());
+    }
+
+    /// Text drawn by the error modal, or empty if it does not appear.
+    ///
+    /// Same two-pass trick as [`panel_text`], and the same reason.
+    fn modal_text(error: Option<String>) -> Vec<String> {
+        let mut app = App {
+            error,
+            ..App::default()
+        };
+
+        fn collect(shape: &egui::epaint::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => into.push(text.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        collect(s, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let ctx = egui::Context::default();
+        let mut found = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| app.error_modal(ctx));
+            found.clear();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut found);
+            }
+            output.textures_delta.clear();
+        }
+        found
+    }
+
+    /// An error has to be acknowledged, not just printed somewhere.
+    ///
+    /// The export refusal originally drew into the status bar, where it read as passive
+    /// text beside the stack name — easy to miss for a message whose whole job is to say
+    /// that the thing you just asked for did not happen.
+    #[test]
+    fn an_error_appears_in_a_modal_with_a_dismiss_button() {
+        let drawn = modal_text(Some("the sky is falling".into()));
+        let has = |needle: &str| drawn.iter().any(|t| t.contains(needle));
+
+        assert!(has("the sky is falling"), "message missing: {drawn:?}");
+        assert!(has("OK"), "no way to dismiss it: {drawn:?}");
+
+        // And it stays out of the way when there is nothing wrong.
+        assert!(
+            modal_text(None).is_empty(),
+            "the modal must not draw without an error"
+        );
+    }
+
+    /// The app's half of the export guard.
+    ///
+    /// `core` proves `ensure_output_outside_stack` decides correctly; this proves the app
+    /// *asks* it, and asks it about the right directory — the frames' own, not a stored
+    /// field that could drift. Worth having separately because the two halves failed
+    /// independently in the incident that motivated them: the check existed in `core` as
+    /// a name allowlist, and the export path never consulted anything at all.
+    ///
+    /// The save dialog cannot be driven from a test, and on this machine cannot be driven
+    /// at all — `osascript` is denied assistive access, so the window cannot even be
+    /// raised. Splitting the decision out of the dialog is what makes the guard testable
+    /// rather than merely inspected.
+    #[test]
+    fn export_is_refused_into_the_stacks_own_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let frames = dir.path().join("blossom");
+        std::fs::create_dir(&frames).unwrap();
+        for name in ["a.tif", "b.tif"] {
+            let info = FrameInfo {
+                width: 32,
+                height: 16,
+                samples: 3,
+                bits_per_sample: 16,
+            };
+            stackaroni_core::tiff_io::write_rgb16_srgb(&frames.join(name), info, |_, row| {
+                row.fill(0.5);
+                Ok(())
+            })
+            .unwrap();
+        }
+        let stack = Stack::load(&frames, Arc::new(AtomicU64::new(0))).unwrap();
+
+        // The filename the app itself suggests, which is what made this easy to do.
+        let refused = frames.join("blossom_stacked.tif");
+        let message = App::refusal_for(Some(&stack), &refused)
+            .expect("saving into the frames' own directory must be refused");
+        assert!(
+            message.contains("extra frame"),
+            "the refusal must say why, not just refuse: {message}"
+        );
+
+        // Everywhere else is still allowed, including a path that does not exist yet.
+        for allowed in [
+            dir.path().join("blossom_stacked.tif"),
+            dir.path().join("exports/blossom_stacked.tif"),
+        ] {
+            assert!(
+                App::refusal_for(Some(&stack), &allowed).is_none(),
+                "should have been allowed: {}",
+                allowed.display()
+            );
+        }
+
+        // No stack loaded means nothing to protect, and export must not be blocked.
+        assert!(App::refusal_for(None, &refused).is_none());
     }
 
     /// Does the panel actually swap, on screen, when the method changes?
