@@ -75,6 +75,25 @@ Parameters are exposed rather than hidden, because the useful values are data-de
 decoding and denoising are deliberately out of scope. Samples are converted to linear
 light on decode and re-encoded to sRGB on write.
 
+**One folder per stack, and the filenames set the order.** Every frame of a stack lives in
+its own directory, and frames are sorted *lexicographically* by filename — that order is
+taken to be the focus order.
+
+**Number them with zero padding.** `frame_001.tif … frame_100.tif` sorts correctly;
+`frame_1.tif … frame_100.tif` does not, because `frame_10` sorts before `frame_2`.
+
+**There is no fallback for this, and nothing warns you.** There is no natural-number sort
+and no attempt to infer order from EXIF or focus distance — a badly padded stack is simply
+stacked in the wrong order. It will not error, it will produce a bad result: registration
+chains outward from the middle frame on the assumption that neighbouring files are
+neighbouring focus positions, so scrambling that order scrambles the alignment. Cameras and
+tethering software pad by default, which is why this has never bitten in practice.
+
+**Keep other TIFFs out of the folder.** Any `.tif`/`.tiff` in the directory is treated as a
+frame, apart from a short list of known non-frames. Saving a fused result next to its own
+source frames would feed it back in as an extra frame on the next run — so the app and the
+CLI both refuse to write output into the directory they are stacking from.
+
 ## How quality is judged
 
 There is no automated ground truth for a photograph, so **a human rates every candidate
