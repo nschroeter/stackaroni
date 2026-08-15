@@ -45,12 +45,10 @@ use fs4::available_space;
 use stackaroni_core::defaults;
 use stackaroni_core::error::{Error, Result};
 use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
+use stackaroni_core::fusion::FusionKind;
 use stackaroni_core::image::FrameInfo;
-use stackaroni_core::pipeline::{
-    Image, Method, RunControl, StackFusion, Stage, Transform, WeightEstimator,
-};
+use stackaroni_core::pipeline::{Image, RunControl, Stage, Transform, WeightEstimator};
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
-use stackaroni_core::wavelet::WaveletStack;
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
 
 /// Everything the pipeline needs that the UI owns.
@@ -61,10 +59,9 @@ pub struct Settings {
     pub guide_radius: u32,
     pub guide_epsilon: f32,
     pub guide_space: GuideSpace,
-    /// Carries its own parameters all the way down — the salience radius lives inside
-    /// `Local`'s `Select`, the consistency threshold inside `Wavelet` — so a method
-    /// that does not read a parameter cannot be handed one.
-    pub method: Method,
+    /// Carries its own parameters — the salience radius lives inside `Select` — so a
+    /// rule that does not read a parameter cannot be handed one.
+    pub fusion: FusionKind,
     pub pyramid_floor: u32,
 }
 
@@ -76,7 +73,7 @@ impl Default for Settings {
             guide_radius: defaults::GUIDE_RADIUS,
             guide_epsilon: defaults::GUIDE_EPSILON,
             guide_space: defaults::GUIDE_SPACE,
-            method: defaults::METHOD,
+            fusion: defaults::FUSION,
             pyramid_floor: defaults::PYRAMID_FLOOR,
         }
     }
@@ -330,35 +327,23 @@ fn pipeline(
         .map(|p| Image::open(p))
         .collect::<Result<_>>()?;
 
-    // Registration above is shared by both methods; below it they diverge entirely.
-    // `Wavelet` runs no focus or weights stage — those are inside its transform, not
-    // skipped — so nothing here computes a plane it will not use.
-    match settings.method {
-        Method::Local { fusion } => {
-            let metric = WindowedLaplacian::new(settings.focus_radius, scratch, by_path.clone());
-            let focus_maps = evaluate_stack(&metric, frames, run)?;
+    let metric = WindowedLaplacian::new(settings.focus_radius, scratch, by_path.clone());
+    let focus_maps = evaluate_stack(&metric, frames, run)?;
 
-            let weights = GuidedWeights::new(
-                frames.to_vec(),
-                transforms,
-                settings.guide_radius,
-                settings.guide_epsilon,
-                settings.guide_space,
-                scratch,
-            )
-            .weights(&focus_maps, run)?;
+    let weights = GuidedWeights::new(
+        frames.to_vec(),
+        transforms,
+        settings.guide_radius,
+        settings.guide_epsilon,
+        settings.guide_space,
+        scratch,
+    )
+    .weights(&focus_maps, run)?;
 
-            fusion
-                .build(output, by_path, settings.pyramid_floor)
-                .fuse(&images, &weights, run)?;
-        }
-        Method::Wavelet {
-            consistency_threshold,
-        } => {
-            WaveletStack::new(output, settings.pyramid_floor, consistency_threshold, None)
-                .stack(&images, &by_path, run)?;
-        }
-    }
+    settings
+        .fusion
+        .build(output, by_path, settings.pyramid_floor)
+        .fuse(&images, &weights, run)?;
     Ok(output.to_path_buf())
 }
 
@@ -480,42 +465,26 @@ mod tests {
         let info = stack.probe().unwrap().info;
         let scratch = tempfile::tempdir().unwrap();
 
-        // Every configuration the two front ends can both reach: both fusion rules under
-        // `local`, plus `wavelet`, which takes an entirely different path through
-        // `pipeline` and so is exactly where the two could diverge unnoticed.
-        let cases: Vec<(&str, Method, Vec<&str>)> = vec![
+        // Every configuration the two front ends can both reach. That is both fusion
+        // rules since T17 removed the wavelet method; the third case went with it.
+        let cases: Vec<(&str, FusionKind, Vec<&str>)> = vec![
             (
                 "select",
-                Method::Local {
-                    fusion: FusionKind::Select {
-                        salience_radius: defaults::SALIENCE_RADIUS,
-                    },
+                FusionKind::Select {
+                    salience_radius: defaults::SALIENCE_RADIUS,
                 },
                 vec!["--fusion", "select"],
             ),
-            (
-                "blend",
-                Method::Local {
-                    fusion: FusionKind::Blend,
-                },
-                vec!["--fusion", "blend"],
-            ),
-            (
-                "wavelet",
-                Method::Wavelet {
-                    consistency_threshold: defaults::CONSISTENCY_THRESHOLD,
-                },
-                vec!["--method", "wavelet"],
-            ),
+            ("blend", FusionKind::Blend, vec!["--fusion", "blend"]),
         ];
 
-        for (index, (name, method, cli_args)) in cases.into_iter().enumerate() {
+        for (index, (name, fusion, cli_args)) in cases.into_iter().enumerate() {
             // The app path: the same `Run` the button drives.
             let mut run = Run::start(
                 stack.frames.clone(),
                 info,
                 Settings {
-                    method,
+                    fusion,
                     ..Settings::default()
                 },
                 egui::Context::default(),

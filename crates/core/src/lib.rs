@@ -14,5 +14,4 @@ pub mod image;
 pub mod pipeline;
 pub mod registration;
 pub mod tiff_io;
-pub mod wavelet;
 pub mod weights;

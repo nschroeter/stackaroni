@@ -99,7 +99,16 @@ F(x,y)   = F_0(x,y) + sum over k=1..S-1  d^k * expand^k(F_k)(x,y)
 
 Wavelet transforms decompose an image into low-frequency structure and several high-frequency directional bands. Focus decisions can be made on wavelet coefficients and the result reconstructed (Li, Manjunath & Mitra, 1995). Wavelets offer good detail preservation and natural multi-scale behavior, but coefficient-selection rules and boundary handling introduce additional design choices.
 
-### T14 — implemented as `core::wavelet`
+### T14 — implemented, rated, and removed in T17
+
+> **Removed from the codebase.** `core::wavelet` and the `StackFusion` trait no longer
+> exist; `git log` has them. It rated **2 / 4 / 2** on the test stacks against the
+> Laplacian path's 5 / 5 / 5, and its characteristic defect — the defocus spread effect,
+> §5.1 below — survived a published fix implemented in full (T16). **The section below is
+> kept as the record of what was built and what it cost, not as a description of the
+> shipped pipeline.** Anyone rebuilding it should read the T14, T15, T16 and T17 rows in
+> `docs/eval-log.md` first; the interesting finding is architectural, not photographic.
+
 
 **This is the first method in the codebase that does not fit the four-stage pipeline**, and that is why it was built: focus measurement, weight estimation and fusion collapse into one operation on transform coefficients. Registration still applies. It implements `StackFusion` rather than `ImageFusion`; see the stage-boundary note in `CLAUDE.md`.
 

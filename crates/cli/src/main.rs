@@ -18,9 +18,7 @@ use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::FusionKind;
 use stackaroni_core::grid::Grid;
 use stackaroni_core::pipeline::{FocusMap, Image, RunControl, Stage, Transform, WeightEstimator};
-use stackaroni_core::pipeline::{Method, StackFusion};
 use stackaroni_core::registration::{PhaseCorrelation, register_stack};
-use stackaroni_core::wavelet::WaveletStack;
 use stackaroni_core::weights::{GuideSpace, GuidedWeights};
 
 #[derive(Parser)]
@@ -94,33 +92,6 @@ struct Cli {
     /// Salience window radius for `--fusion select`. Ignored by `blend`.
     #[arg(long, default_value_t = defaults::SALIENCE_RADIUS)]
     salience_radius: u32,
-
-    /// Which pipeline shape to run. `local` is recommended; see `docs/algorithms.md` §5
-    /// for `wavelet`.
-    ///
-    /// `local` is the four-stage pipeline every row in `docs/eval-log.md` was scored
-    /// under, and stays the default. It rates 5/5/5 on the test stacks.
-    ///
-    /// `wavelet` replaces focus measurement, weight estimation and fusion with
-    /// coefficient selection in a CDF 5/3 transform; `--focus-radius`, `--guide-*`,
-    /// `--fusion` and `--salience-radius` do not apply to it. It rates 2/4/2 — it
-    /// pulls colour from out-of-focus frames into smooth backgrounds near a subject's
-    /// edge (the defocus spread effect), which textured backgrounds hide and smooth
-    /// ones do not. Kept because it is the worked example of a method the four-stage
-    /// decomposition cannot express, not because it is an equal alternative.
-    #[arg(
-        long,
-        value_name = "METHOD",
-        default_value_t = defaults::METHOD,
-        value_parser = PossibleValuesParser::new(Method::TOKENS)
-            .try_map(|s| Method::from_token(&s).ok_or_else(|| format!("unknown method {s}"))),
-    )]
-    method: Method,
-
-    /// How many of a coefficient's 8 neighbours must agree before `--method wavelet`
-    /// overrides its selected frame. Ignored by `local`.
-    #[arg(long, default_value_t = defaults::CONSISTENCY_THRESHOLD)]
-    consistency_threshold: u32,
 
     /// Report per-frame progress.
     #[arg(long, short)]
@@ -316,64 +287,47 @@ fn pipeline(
         .map(|p| Image::open(p))
         .collect::<stackaroni_core::error::Result<_>>()?;
 
-    // Registration above is shared; everything below it is what the method chooses.
-    // `Wavelet` runs no focus or weights stage at all — there is nothing for it to
-    // skip, because those stages are inside its own transform.
-    let fused = match cli.method {
-        Method::Local { .. } => {
-            let step = Instant::now();
-            let metric = WindowedLaplacian::new(cli.focus_radius, scratch, by_path.clone());
-            let focus_maps = evaluate_stack(&metric, &stack.frames, &run)?;
-            println!("  focus     {:>5.0}s", step.elapsed().as_secs_f32());
+    let fused = {
+        let step = Instant::now();
+        let metric = WindowedLaplacian::new(cli.focus_radius, scratch, by_path.clone());
+        let focus_maps = evaluate_stack(&metric, &stack.frames, &run)?;
+        println!("  focus     {:>5.0}s", step.elapsed().as_secs_f32());
 
-            let step = Instant::now();
-            let estimator = GuidedWeights::new(
-                stack.frames.clone(),
-                transforms.clone(),
-                cli.guide_radius,
-                cli.guide_epsilon,
-                cli.guide_space.into(),
-                scratch,
-            );
-            if let Some(dir) = debug_dir {
-                debug::write_plane(
-                    &dir.join("labels_argmax.png"),
-                    &estimator.labels(&focus_maps, &run)?,
-                )?;
-            }
-            let weights = estimator.weights(&focus_maps, &run)?;
-            println!("  weights   {:>5.0}s", step.elapsed().as_secs_f32());
-
-            if let Some(dir) = debug_dir {
-                write_debug(dir, stack, &transforms, &focus_maps, &weights)?;
-            }
-
-            let step = Instant::now();
-            // `--salience-radius` is a separate argument, so the rule is parsed first and
-            // its parameter folded in here. `Blend` drops it, which is what the flag has
-            // always documented — now enforced by the type rather than by a constructor
-            // ignoring it.
-            let fusion = cli.fusion.with_salience_radius(cli.salience_radius).build(
-                output,
-                by_path,
-                cli.pyramid_floor,
-            );
-            let fused = fusion.fuse(&images, &weights, &run)?;
-            println!("  fuse      {:>5.0}s", step.elapsed().as_secs_f32());
-            fused
+        let step = Instant::now();
+        let estimator = GuidedWeights::new(
+            stack.frames.clone(),
+            transforms.clone(),
+            cli.guide_radius,
+            cli.guide_epsilon,
+            cli.guide_space.into(),
+            scratch,
+        );
+        if let Some(dir) = debug_dir {
+            debug::write_plane(
+                &dir.join("labels_argmax.png"),
+                &estimator.labels(&focus_maps, &run)?,
+            )?;
         }
-        Method::Wavelet { .. } => {
-            let step = Instant::now();
-            let stacker = WaveletStack::new(
-                output,
-                cli.pyramid_floor,
-                cli.consistency_threshold,
-                debug_dir,
-            );
-            let fused = stacker.stack(&images, &by_path, &run)?;
-            println!("  wavelet   {:>5.0}s", step.elapsed().as_secs_f32());
-            fused
+        let weights = estimator.weights(&focus_maps, &run)?;
+        println!("  weights   {:>5.0}s", step.elapsed().as_secs_f32());
+
+        if let Some(dir) = debug_dir {
+            write_debug(dir, stack, &transforms, &focus_maps, &weights)?;
         }
+
+        let step = Instant::now();
+        // `--salience-radius` is a separate argument, so the rule is parsed first and
+        // its parameter folded in here. `Blend` drops it, which is what the flag has
+        // always documented — now enforced by the type rather than by a constructor
+        // ignoring it.
+        let fusion = cli.fusion.with_salience_radius(cli.salience_radius).build(
+            output,
+            by_path,
+            cli.pyramid_floor,
+        );
+        let fused = fusion.fuse(&images, &weights, &run)?;
+        println!("  fuse      {:>5.0}s", step.elapsed().as_secs_f32());
+        fused
     };
 
     if let Some(dir) = debug_dir {

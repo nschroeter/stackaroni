@@ -85,6 +85,17 @@ fusion rule strains it again, the question to settle is whether the contract is 
 drive fusion" or "fusion may re-measure" — decide it deliberately, don't let a third
 implementation settle it by accident.
 
+**This was demonstrated and then removed, which is worth knowing before rebuilding it.**
+T14 built the wavelet method and it needed a fifth trait, `StackFusion`, for exactly the
+reason above. T17 deleted the method — it rated 2/4/2 against `local`'s 5/5/5 — and
+`StackFusion` and the `Method` chooser went with it, so **the demonstration now survives
+only as this paragraph and the eval-log rows.** The finding stands; the code that proved it
+does not. If a future method collapses the stages again, expect to reintroduce a trait like
+`StackFusion` rather than to force it into the four, and read the T14, T16 and T17 rows
+first — the wavelet path was rated, diagnosed (defocus spread effect), had a published fix
+implemented and measured inert, and was then removed. That is a closed line of work, not an
+open one.
+
 Keep each stage independently replaceable via traits, so different algorithms can be
 benchmarked against each other without rewriting the app:
 
