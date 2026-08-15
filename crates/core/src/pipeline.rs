@@ -230,7 +230,6 @@ pub trait ImageFusion: Sync {
 /// [`ImageFusion`], because the quantities it decides on live in a coefficient domain
 /// that neither type can represent.
 ///
-///
 /// **Registration is deliberately still outside.** It is the one stage every method
 /// shares — a wavelet decomposition of unregistered frames is as wrong as a pyramid of
 /// them — so the driver aligns first and hands the transforms in. That keeps a
