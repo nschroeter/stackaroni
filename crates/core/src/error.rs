@@ -90,6 +90,16 @@ pub enum Error {
     /// A caller-supplied buffer was the wrong size.
     #[error("buffer is {got} samples, expected {want}")]
     BufferSize { got: usize, want: usize },
+
+    /// The result would land in the directory it was stacked from.
+    ///
+    /// Its own variant because the remedy is specific and the user must see it *before*
+    /// the run, not as a generic write failure afterwards.
+    #[error(
+        "{output} is inside the stack directory {dir}, so the result would be read back \
+         as an extra frame on the next run — write it somewhere else"
+    )]
+    OutputInsideStack { output: PathBuf, dir: PathBuf },
 }
 
 impl Error {

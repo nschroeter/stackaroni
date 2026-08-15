@@ -12,12 +12,52 @@ use crate::tiff_io::probe;
 /// 50 frames; without this it would be stacked as a 51st frame.
 /// `stackaroni_fused` is our own output: writing a result next to the frames it was
 /// made from would otherwise feed it back in as an extra frame on the next run.
+///
+/// **This list is a backstop, not the defence.** It only recognises names it already
+/// knows, and the case that actually happened went straight past it: fused results saved
+/// as `blossom_stacked_local.tif` and `ruler_stacked_local.tif` into their own stack
+/// directories, silently stacked as 101st frames on both real stacks, with the only
+/// symptom a frame count in one line of CLI output. Enumerating more names does not fix
+/// that — [`ensure_output_outside_stack`] does, by refusing to create the file. Extend
+/// this list only for files a *third party* leaves beside the frames, the way
+/// `reference_pmax` arrives.
 const NON_FRAME_STEMS: &[&str] = &[
     "ground_truth_all_in_focus",
     "depth_map",
     "stackaroni_fused",
     "reference_pmax",
 ];
+
+/// Refuse to write a fused result into the directory it was stacked from.
+///
+/// A fused frame has the same geometry and bit depth as its sources, so nothing
+/// downstream can tell it apart: [`discover_stack`]'s geometry check accepts it, it
+/// registers, it fuses, and the corruption is invisible in the output image. That makes
+/// it exactly the kind of mistake that survives a rating and silently invalidates an
+/// entry in `docs/eval-log.md`.
+///
+/// Compares canonical paths rather than strings, so `../blossom/out.tif`, a trailing
+/// slash and a symlinked directory are all caught. An output whose parent cannot be
+/// canonicalized does not exist yet and therefore is not the stack directory, which
+/// does — so that case passes.
+pub fn ensure_output_outside_stack(output: &Path, stack_dir: &Path) -> Result<()> {
+    let parent = match output.parent() {
+        // A bare filename means the current directory.
+        Some(p) if p.as_os_str().is_empty() => Path::new("."),
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let (Ok(parent), Ok(dir)) = (parent.canonicalize(), stack_dir.canonicalize()) else {
+        return Ok(());
+    };
+    if parent == dir {
+        return Err(Error::OutputInsideStack {
+            output: output.to_path_buf(),
+            dir: stack_dir.to_path_buf(),
+        });
+    }
+    Ok(())
+}
 
 /// A directory of frames, in stacking order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,6 +206,62 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_str().unwrap())
             .collect();
         assert_eq!(names, ["f_001.tiff", "f_002.tif", "f_003.tiff"]);
+    }
+
+    /// The exact mistake this guard exists for, pinned: a fused result saved beside the
+    /// frames it came from. Named after the file that actually did it.
+    #[test]
+    fn refuses_an_output_inside_the_stack_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = dir.path();
+        let output = stack.join("blossom_stacked_local.tif");
+        assert!(matches!(
+            ensure_output_outside_stack(&output, stack),
+            Err(Error::OutputInsideStack { .. })
+        ));
+    }
+
+    /// String comparison would miss both of these; canonicalization catches them.
+    #[test]
+    fn refuses_an_output_reaching_the_stack_by_a_roundabout_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = dir.path().join("blossom");
+        std::fs::create_dir(&stack).unwrap();
+
+        for output in [
+            stack.join("../blossom/out.tif"),
+            dir.path().join("./blossom/./out.tif"),
+        ] {
+            assert!(
+                matches!(
+                    ensure_output_outside_stack(&output, &stack),
+                    Err(Error::OutputInsideStack { .. })
+                ),
+                "should have been refused: {}",
+                output.display()
+            );
+        }
+    }
+
+    #[test]
+    fn allows_an_output_elsewhere() {
+        let dir = tempfile::tempdir().unwrap();
+        let stack = dir.path().join("blossom");
+        std::fs::create_dir(&stack).unwrap();
+
+        // A sibling directory, a parent, and a path whose directory does not exist yet —
+        // the last cannot be the stack directory, because that one does exist.
+        for output in [
+            dir.path().join("out/blossom.tif"),
+            dir.path().join("blossom.tif"),
+            dir.path().join("not/created/yet/blossom.tif"),
+        ] {
+            assert!(
+                ensure_output_outside_stack(&output, &stack).is_ok(),
+                "should have been allowed: {}",
+                output.display()
+            );
+        }
     }
 
     #[test]

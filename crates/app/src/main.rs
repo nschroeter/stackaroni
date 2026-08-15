@@ -45,6 +45,7 @@ use std::sync::atomic::AtomicU64;
 use eframe::egui;
 use run::{Export, Outcome, Run, Settings};
 use stack::{Preview, Stack, Thumbnail};
+use stackaroni_core::discovery::ensure_output_outside_stack;
 use stackaroni_core::image::FrameInfo;
 
 fn main() -> eframe::Result {
@@ -428,6 +429,26 @@ impl App {
         else {
             return;
         };
+
+        // Refused rather than warned about: saving here corrupts the stack for every
+        // later run, invisibly — the result has the frames' geometry, so it is simply
+        // stacked as an extra frame, and the only symptom is the frame count. This is
+        // not hypothetical; the default filename below is what landed in
+        // `test-data/blossom` and `test-data/ruler` and went unnoticed through several
+        // runs and a rating.
+        // Taken from a frame rather than stored separately: the frames are what the
+        // guard is protecting, so their own directory is the authoritative answer and
+        // cannot drift from it.
+        if let Some(dir) = self
+            .stack
+            .as_ref()
+            .and_then(|s| s.frames.first())
+            .and_then(|f| f.path.parent())
+            && let Err(e) = ensure_output_outside_stack(&destination, dir)
+        {
+            self.error = Some(e.to_string());
+            return;
+        }
 
         self.error = None;
         self.exported = None;

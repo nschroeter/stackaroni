@@ -11,7 +11,9 @@ use clap::{Parser, ValueEnum};
 use fs4::available_space;
 use stackaroni_core::debug;
 use stackaroni_core::defaults;
-use stackaroni_core::discovery::{Stack, discover_stack, discover_test_set};
+use stackaroni_core::discovery::{
+    Stack, discover_stack, discover_test_set, ensure_output_outside_stack,
+};
 use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
 use stackaroni_core::fusion::FusionKind;
 use stackaroni_core::grid::Grid;
@@ -168,9 +170,20 @@ fn main() -> Result<()> {
         _ => unreachable!("clap requires one of --input or --test-set"),
     };
 
-    for stack in &stacks {
-        let output = output_path(&cli, stack, stacks.len())?;
-        run(&cli, stack, &output)?;
+    // Every stack is checked before any of them runs. Failing on stack three of five
+    // after two results are already on disk would leave the user to work out which are
+    // trustworthy; refusing up front leaves nothing to untangle.
+    let outputs: Vec<PathBuf> = stacks
+        .iter()
+        .map(|stack| {
+            let output = output_path(&cli, stack, stacks.len())?;
+            ensure_output_outside_stack(&output, &stack.dir)?;
+            Ok(output)
+        })
+        .collect::<Result<_>>()?;
+
+    for (stack, output) in stacks.iter().zip(&outputs) {
+        run(&cli, stack, output)?;
     }
     Ok(())
 }
