@@ -6,3 +6,8 @@ test-data/*
 !test-data/README.md
 target
 .DS_Store
+
+# IDE settings: per-developer, and this project has no shared run configurations
+# worth committing. Kept out rather than curated, so nobody's local layout ends up
+# in a diff about the pipeline.
+.idea/
