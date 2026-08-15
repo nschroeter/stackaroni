@@ -7,6 +7,16 @@ Takes a folder of 16-bit TIFF frames shot at stepped focus distances and produce
 image with everything sharp — aligning the frames, measuring where each is in focus, and
 combining them without seams, halos or ghosting.
 
+A single source frame — only the near end of the ruler is in focus:
+
+![The Stackaroni window showing one source frame of a 100-frame stack, sharp at the near
+end and blurred along the rest of the ruler](docs/images/screenshot.jpg)
+
+The fused result from all 100 frames — sharp end to end:
+
+![The same window showing the fused result, with the whole ruler in focus from the metal
+tip to the far markings](docs/images/screenshot-result.jpg)
+
 > **Status: it works and is in use, but it is one person's tool.** Output is judged by eye
 > against a fixed checklist on a fixed set of test stacks; the ratings and the reasoning
 > behind every change are in [`docs/eval-log.md`](docs/eval-log.md). There is no packaged
