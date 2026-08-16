@@ -13,9 +13,11 @@ use rayon::prelude::*;
 use rustfft::FftPlanner;
 use rustfft::num_complex::Complex32;
 
+use crate::budget;
 use crate::error::{Error, Result};
 use crate::grid::Grid;
 use crate::pipeline::{Image, Registration, RunControl, Stage, Transform};
+use crate::tiff_io::cache_bytes_max;
 
 /// Whitening regularizer, as a fraction of the strongest cross-spectrum bin.
 const WHITENING_EPS: f32 = 1e-3;
@@ -238,35 +240,41 @@ pub fn register_stack(
     // alignment costs. Composing afterwards in index order also keeps the result
     // independent of the order the threads happen to finish in.
     let done = AtomicUsize::new(0);
-    let steps: Vec<Transform> = (0..n)
-        .into_par_iter()
-        .filter(|&i| i != anchor)
-        .map(|i| {
-            if run.cancelled() {
-                return Err(Error::Cancelled);
-            }
-            // Outward from the anchor: frames after it align against their predecessor,
-            // frames before it against their successor.
-            let reference = if i > anchor { i - 1 } else { i + 1 };
-            let reference = Image::open(&frames[reference])?;
-            let curr = Image::open(&frames[i])?;
-            let step = registration.align(&reference, &curr, run)?;
-            run.progress(
-                Stage::Register,
-                done.fetch_add(1, Ordering::Relaxed) + 1,
-                n - 1,
-            );
-            Ok((i, step))
-        })
-        .collect::<Result<Vec<_>>>()
-        .map(|mut pairs| {
-            pairs.sort_unstable_by_key(|(i, _)| *i);
-            let mut steps = vec![Transform::IDENTITY; n];
-            for (i, step) in pairs {
-                steps[i] = step;
-            }
-            steps
-        })?;
+    // Two frames per task: a pair alignment holds its reference and its target at the
+    // same time. On striped input this charges ~26 MB and the cap does not bind; on
+    // single-strip input it is 600 MB, and 14 concurrent pairs would be 8.4 GB.
+    let per_task = 2 * cache_bytes_max(&frames[0])?;
+    let steps: Vec<Transform> = budget::run_bounded(per_task, || {
+        (0..n)
+            .into_par_iter()
+            .filter(|&i| i != anchor)
+            .map(|i| {
+                if run.cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                // Outward from the anchor: frames after it align against their predecessor,
+                // frames before it against their successor.
+                let reference = if i > anchor { i - 1 } else { i + 1 };
+                let reference = Image::open(&frames[reference])?;
+                let curr = Image::open(&frames[i])?;
+                let step = registration.align(&reference, &curr, run)?;
+                run.progress(
+                    Stage::Register,
+                    done.fetch_add(1, Ordering::Relaxed) + 1,
+                    n - 1,
+                );
+                Ok((i, step))
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(|mut pairs| {
+                pairs.sort_unstable_by_key(|(i, _)| *i);
+                let mut steps = vec![Transform::IDENTITY; n];
+                for (i, step) in pairs {
+                    steps[i] = step;
+                }
+                steps
+            })
+    })?;
 
     for i in anchor + 1..n {
         transforms[i] = transforms[i - 1].then(steps[i]);

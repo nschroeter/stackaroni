@@ -59,6 +59,24 @@ Add a new section above for each additional stack. Keep the field list
 consistent so entries stay comparable at a glance.
 -->
 
+## fixtures/ — not part of the evaluation set
+
+Derived stacks that exist to measure the *engine*, not to rate output. They live one
+level down on purpose: `discover_test_set` turns every directory holding TIFFs directly
+under `test-data/` into a stack, with **no name filtering**, so anything placed beside
+`blossom` silently joins the fixed comparison set. `fixtures/` holds no TIFFs itself, so
+the scan skips it. This is not hypothetical — a fixture sat at the top level briefly and
+`fuse_all_stacks` duly fused all 33 of its frames.
+
+- `blossom_single_strip/` — blossom's first 33 frames rewritten as **one strip per
+  frame**, the layout exporters produce and the shape behind the v1.0.2 decode bug and
+  the T18 memory work. Same pixels as `blossom/`, so strip layout is the only variable
+  between them. ~9.5 GB. Rebuilt by the ignored test `builds_the_single_strip_fixture`
+  in `crates/core/src/tiff_io.rs`.
+- `blossom_striped_33/`, `blossom_striped_8/`, `blossom_single_8/` — symlink directories
+  giving the same frame counts in each layout, for the before/after comparisons in the
+  T18 eval-log row. Symlinks, so they cost nothing.
+
 
 
 

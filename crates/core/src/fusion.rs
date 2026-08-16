@@ -14,6 +14,14 @@
 //! whatever its depth. Row-banding would only be needed to remove a `x frame_count`
 //! term that accumulation already removes, and it would introduce band boundaries to
 //! blend across; there is nothing to gain here until a frame no longer fits.
+//!
+//! **That claim was false in one respect until T18, and the exception is worth
+//! knowing.** It describes what this module *allocates*, and said nothing about what the
+//! `&[Image]` handed to it holds: each reader keeps its decoded strips for its own
+//! lifetime, the caller owns every reader for the whole stage, and on single-strip input
+//! one strip is one whole frame. So the frame count was back in the budget by the side
+//! door — 25 GB on 33 frames. The per-frame `release_cache` in both `fuse` loops is what
+//! makes the paragraph above true of the stage rather than only of its own buffers.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -415,6 +423,12 @@ impl ImageFusion for LaplacianPyramidFusion {
                 .unwrap_or(Transform::IDENTITY);
 
             let warped = warp_frame(image, transform, info)?;
+            // Every frame is read exactly once, here, and never revisited — so its
+            // cached strips are dead the moment the warp returns. Holding them is what
+            // made peak memory scale with the *stack*: the caller owns all `images` for
+            // the whole loop, and on single-strip input one cached strip is one whole
+            // frame. Releasing here keeps this stage at one frame regardless of count.
+            image.release_cache();
             let bands = laplacian_pyramid(&warped, levels);
             drop(warped);
 
@@ -540,6 +554,8 @@ impl ImageFusion for SelectionFusion {
                 .unwrap_or(Transform::IDENTITY);
 
             let warped = warp_frame(image, transform, info)?;
+            // Read once, never revisited — see the same call in `LaplacianPyramidFusion`.
+            image.release_cache();
             let bands = laplacian_pyramid(&warped, levels);
             drop(warped);
 

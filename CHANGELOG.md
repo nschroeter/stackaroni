@@ -16,6 +16,30 @@ Sections in a release, all optional except the first line: 🚀 Features, 🩹 F
 `crates/core/tests/changelog.rs` fails the build if the current version has no section
 here, for the same reason `parameters_doc.rs` exists.
 
+## [Unreleased]
+
+### 🔬 Quality
+
+**tiff, fusion** — single-strip frames no longer make memory grow with the size of the
+stack, and everything got faster. Measured on 33 frames of 8664x5784 16-bit RGB written
+as one strip each: **102.8 s → 52.0 s, peak memory 25.0 GB → 10.1 GB.** The striped
+layout the app was developed against improved too, 75.5 s → 60.0 s.
+
+Three changes. Decoded strips are kept as 16-bit samples rather than expanded to float,
+which halves what one frame in flight costs and — via a lookup table for the sRGB
+transfer function — removes the per-sample `powf` that dominated decoding. Fusion now
+releases a frame's decoded data as soon as it has used it, instead of holding all of them
+until the stage ends. And the stages that work on several frames at once size their
+parallelism to the machine's RAM, so a 16 GB machine runs fewer frames concurrently
+rather than running out.
+
+**Fused output is byte-identical**: the pinned regression hash did not move, and the
+lookup table is asserted exact against the function it replaces for all 65536 possible
+sample values.
+
+**This supersedes the 1.0.2 note below.** Re-exporting with strips is no longer the
+remedy for a large single-strip stack, though striped input is still cheaper to read.
+
 ## [1.0.2] — 2026-08-16
 
 ### 🩹 Fixes

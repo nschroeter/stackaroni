@@ -17,10 +17,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 
+use crate::budget;
 use crate::error::{Error, Result};
 use crate::filter::box_sum;
 use crate::image::{BAND_ROWS, FrameInfo, ScratchPlane, warp_plane};
 use crate::pipeline::{FocusMap, FocusMetric, Image, RunControl, Stage, Transform};
+use crate::tiff_io::cache_bytes_max;
 
 /// Rec. 709 luma coefficients, applied to linear-light RGB.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
@@ -96,24 +98,32 @@ pub fn evaluate_stack(
     run: &dyn RunControl,
 ) -> Result<Vec<FocusMap>> {
     let total = frames.len();
+    if total == 0 {
+        return Ok(Vec::new());
+    }
     let done = AtomicUsize::new(0);
 
-    let mut indexed: Vec<(usize, FocusMap)> = frames
-        .par_iter()
-        .enumerate()
-        .map(|(index, path)| {
-            if run.cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let map = metric.evaluate(&Image::open(path)?, run)?;
-            run.progress(
-                Stage::Focus,
-                done.fetch_add(1, Ordering::Relaxed) + 1,
-                total,
-            );
-            Ok((index, map))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // One frame per task here, against registration's two. Costs a header read, which is
+    // why the empty case returns above rather than being handled by the loop.
+    let per_task = cache_bytes_max(&frames[0])?;
+    let mut indexed: Vec<(usize, FocusMap)> = budget::run_bounded(per_task, || {
+        frames
+            .par_iter()
+            .enumerate()
+            .map(|(index, path)| {
+                if run.cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                let map = metric.evaluate(&Image::open(path)?, run)?;
+                run.progress(
+                    Stage::Focus,
+                    done.fetch_add(1, Ordering::Relaxed) + 1,
+                    total,
+                );
+                Ok((index, map))
+            })
+            .collect::<Result<Vec<_>>>()
+    })?;
 
     indexed.sort_unstable_by_key(|(index, _)| *index);
     Ok(indexed.into_iter().map(|(_, map)| map).collect())

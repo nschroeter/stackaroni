@@ -125,6 +125,27 @@ impl Image {
         let mut reader = self.reader.lock().expect("frame reader mutex poisoned");
         reader.read_rows(y0, count, out)
     }
+
+    /// Drop this frame's cached strips.
+    ///
+    /// **For a caller holding many `Image`s at once, which is where the memory goes.**
+    /// A reader keeps decoded strips for its whole lifetime, and on a single-strip file
+    /// one strip is the entire frame — so a `Vec<Image>` over a 33-frame stack ends up
+    /// holding 33 frames of pixels even though the loop that reads them touches one at a
+    /// time. Fusion calls this the moment a frame has been warped.
+    ///
+    /// Never affects results: a released strip is decoded again if it is read again.
+    /// Takes `&self` so it is callable from the stage traits, which see `&Image`.
+    pub fn release_cache(&self) {
+        let mut reader = self.reader.lock().expect("frame reader mutex poisoned");
+        reader.release_cache();
+    }
+
+    /// Bytes this frame's strip cache is currently holding.
+    pub fn cache_bytes(&self) -> usize {
+        let reader = self.reader.lock().expect("frame reader mutex poisoned");
+        reader.cache_bytes()
+    }
 }
 
 /// Which stage is reporting.

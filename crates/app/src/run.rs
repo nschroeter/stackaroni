@@ -192,6 +192,7 @@ impl RunControl for Shared {
 }
 
 /// How a run ended.
+#[derive(Debug)]
 pub enum Outcome {
     Done(PathBuf),
     Cancelled,
@@ -594,10 +595,11 @@ mod tests {
             if stage == Stage::Fuse && done >= 3 {
                 break;
             }
-            assert!(
-                run.poll().is_none(),
-                "the run finished before it could be cancelled"
-            );
+            // Naming the outcome matters: this fires both when the run genuinely
+            // outran the test and when it *failed*, and those need different fixes.
+            if let Some(outcome) = run.poll() {
+                panic!("the run ended before it could be cancelled: {outcome:?}");
+            }
             std::thread::sleep(Duration::from_millis(200));
         }
 

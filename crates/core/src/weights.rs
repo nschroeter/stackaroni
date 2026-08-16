@@ -16,10 +16,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
+use crate::budget;
 use crate::error::{Error, Result};
 use crate::filter::{box_mean, mul};
 use crate::image::{BAND_ROWS, ScratchPlane, linear_to_srgb, warp_plane};
 use crate::pipeline::{FocusMap, Image, RunControl, Stage, Transform, WeightEstimator, WeightMaps};
+use crate::tiff_io::cache_bytes_max;
 
 /// Rec. 709 luma coefficients, applied to linear-light RGB.
 const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
@@ -219,24 +221,28 @@ impl WeightEstimator for GuidedWeights {
         // writes its own plane, so the only shared input is the read-only label field.
         let total = self.frames.len();
         let done = AtomicUsize::new(0);
-        let mut indexed: Vec<(usize, ScratchPlane)> = (0..total)
-            .into_par_iter()
-            .map(|index| {
-                if run.cancelled() {
-                    return Err(Error::Cancelled);
-                }
-                let guide = self.guide(index)?;
-                let plane = self.refine(index, &labels, &guide)?;
-                drop(guide);
-                let _ = std::fs::remove_file(self.scratch.join(format!("guide{index}.f32")));
-                run.progress(
-                    Stage::Weights,
-                    done.fetch_add(1, Ordering::Relaxed) + 1,
-                    total,
-                );
-                Ok((index, plane))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        // One frame per task: `guide` opens the frame, reads it once and drops it.
+        let per_task = cache_bytes_max(&self.frames[0])?;
+        let mut indexed: Vec<(usize, ScratchPlane)> = budget::run_bounded(per_task, || {
+            (0..total)
+                .into_par_iter()
+                .map(|index| {
+                    if run.cancelled() {
+                        return Err(Error::Cancelled);
+                    }
+                    let guide = self.guide(index)?;
+                    let plane = self.refine(index, &labels, &guide)?;
+                    drop(guide);
+                    let _ = std::fs::remove_file(self.scratch.join(format!("guide{index}.f32")));
+                    run.progress(
+                        Stage::Weights,
+                        done.fetch_add(1, Ordering::Relaxed) + 1,
+                        total,
+                    );
+                    Ok((index, plane))
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
 
         // Restored to frame order before normalising: `normalize` sums across planes, and
         // float addition is not associative, so a completion-order shuffle would perturb

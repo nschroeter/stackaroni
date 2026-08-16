@@ -10,6 +10,10 @@ memmap2 = "0.9.11"
 png = "0.18.1"
 rayon = "1.12.0"
 rustfft = "6.4.1"
+# Physical RAM, for the concurrency budget in `budget.rs`. Cross-platform on purpose:
+# the alternatives are a fixed constant (wrong on both an 8 GB laptop and a 128 GB
+# workstation) or three platform-specific calls, which `CLAUDE.md` asks us to avoid.
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 thiserror = "2.0.20"
 tiff = "0.11.3"
 

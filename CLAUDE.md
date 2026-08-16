@@ -151,6 +151,17 @@ and a 6 s tail on a 20-minute operation reads as normal. Revisit only if it actu
 slow. Never check inside the final `write_rgb16_srgb` — a truncated TIFF that looks like a
 real output is worse than finishing the write.
 
+**How wide those stages go is a memory decision, not a core count** (`crates/core/src/budget.rs`,
+T18). A strip is the TIFF decoder's atomic unit, so a frame written as a *single* strip — common
+from exporters — is entirely resident while its rows are read: 300 MB against ~13 MB for the same
+pixels in 64-row strips. Registration holds two such readers per task, so 14 cores would start
+8.4 GB of frame cache. The three parallel stages therefore run inside a rayon pool sized to a
+share of physical RAM. **Capping concurrency, never evicting caches** — a shared LRU below one
+strip would re-decode 300 MB per row read, turning a memory problem into a far worse time one.
+On striped input the cap does not bind and scheduling is unchanged, which is what keeps every
+rating in `docs/eval-log.md` valid. Fusion is exempt: it is sequential and releases each frame's
+cache as it finishes with it, so it is O(one frame) regardless of stack depth.
+
 `Error::Cancelled` is the one error variant that is not a fault. Callers should clean up
 scratch on it rather than keeping it for inspection, and treat the run as never having
 happened — there is no partial output to preserve, precisely because the write is never

@@ -2,6 +2,7 @@
 //!
 //! See `docs/algorithms.md` for the algorithms each stage implements and why.
 
+pub mod budget;
 pub mod debug;
 pub mod defaults;
 pub mod discovery;
