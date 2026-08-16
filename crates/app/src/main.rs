@@ -358,6 +358,34 @@ struct App {
 }
 
 impl App {
+    /// Drop everything that described the stack being replaced.
+    ///
+    /// Every field here outlives the folder it belongs to if it is not cleared, and the
+    /// symptoms differ enough to be worth naming:
+    ///
+    /// - `result` is the one that bit. [`Self::preview`] shows the fused result whenever
+    ///   it is `Some`, *ignoring the stack*, so opening a new folder after a run left the
+    ///   previous stack's output in the centre pane while the filmstrip correctly showed
+    ///   the new frames. It was already cleared on clicking a frame and on starting a
+    ///   run — opening a folder was the missed third door.
+    /// - `view` carries zoom and pan, which are deliberately kept across *frames* so a
+    ///   loupe stays put while stepping through a stack. Across *stacks* they are
+    ///   meaningless, and a 1200x900 stack inherited the framing of a 50 MP one.
+    /// - `exported` and `run_summary` describe a run of the old folder, so leaving them
+    ///   up attributes it to the new one.
+    ///
+    /// Dropping the stack also retires its decode worker, so opening a second folder
+    /// mid-decode does not leave the first one reading gigabytes.
+    fn forget_current_stack(&mut self) {
+        self.stack = None;
+        self.preview = Preview::default();
+        self.selected = 0;
+        self.result = None;
+        self.view = None;
+        self.exported = None;
+        self.run_summary = None;
+    }
+
     fn open_folder(&mut self) {
         let Some(dir) = rfd::FileDialog::new()
             .set_title("Choose a folder of 16-bit TIFF frames")
@@ -366,11 +394,7 @@ impl App {
             return;
         };
 
-        // Dropping the previous stack retires its worker, so opening a second folder
-        // mid-decode does not leave the first one reading gigabytes.
-        self.stack = None;
-        self.preview = Preview::default();
-        self.selected = 0;
+        self.forget_current_stack();
 
         match Stack::load(&dir, Arc::clone(&self.generation)) {
             Ok(stack) => {
@@ -1517,6 +1541,51 @@ mod tests {
             "260 px used to cut labels off; if it no longer does, this test is no longer \
              measuring what it was written to measure"
         );
+    }
+
+    /// Opening a folder must forget everything that described the last one.
+    ///
+    /// The bug this pins: after a run, `result` stayed set across a folder change, and
+    /// `preview` shows the fused result whenever it is `Some` *regardless of the stack* —
+    /// so the centre pane kept displaying the previous stack's output while the filmstrip
+    /// showed the new frames. `result` was cleared when clicking a frame and when
+    /// starting a run; opening a folder was the third door and it was open.
+    ///
+    /// Asserted field by field rather than through the UI, because the failure was a
+    /// field outliving its folder, and a panel test would not see it.
+    #[test]
+    fn opening_a_folder_forgets_the_previous_stack() {
+        let mut app = App {
+            selected: 7,
+            result: Some(std::path::PathBuf::from("/tmp/previous-run.tif")),
+            view: Some(View {
+                scale: 3.5,
+                origin: egui::pos2(120.0, 40.0),
+            }),
+            exported: Some(std::path::PathBuf::from("/tmp/previous-export.tif")),
+            run_summary: Some(RunSummary {
+                headline: "previous run",
+                detail: None,
+                elapsed: std::time::Duration::from_secs(240),
+                stages: [None; 4],
+            }),
+            ..App::default()
+        };
+
+        app.forget_current_stack();
+
+        assert!(app.stack.is_none(), "the stack itself");
+        assert_eq!(app.selected, 0, "selection indexes frames that are gone");
+        assert!(
+            app.result.is_none(),
+            "the fused result outliving its folder is the bug"
+        );
+        assert!(
+            app.view.is_none(),
+            "zoom and pan are meaningless across stacks"
+        );
+        assert!(app.exported.is_none(), "export path describes the old run");
+        assert!(app.run_summary.is_none(), "summary describes the old run");
     }
 
     /// Text drawn by the error modal, or empty if it does not appear.
