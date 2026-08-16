@@ -75,6 +75,14 @@ const PLACEHOLDER_FRAMES: usize = 8;
 /// Height of a filmstrip entry. Thumbnails are fitted inside this, letterboxed.
 const THUMBNAIL_HEIGHT: f32 = 88.0;
 
+/// Inner padding of the app's modal dialogs.
+///
+/// egui frames a modal with `Frame::popup`, whose inner margin is `menu_margin` — 6 px,
+/// sized for a context menu of one-line items. A 400 px dialog with a heading and four
+/// stage rows reads as cramped at that: the text sits almost against the border. Applied
+/// through [`App::modal_frame`] so the run dialog and the error dialog cannot drift apart.
+const MODAL_MARGIN: i8 = 16;
+
 /// Width of the filmstrip's scrollbar.
 ///
 /// Twice egui's default solid bar and six times its floating one. It comes out of the
@@ -453,6 +461,12 @@ impl App {
         }
     }
 
+    /// Shared framing for every modal, so they are recognisably the same object.
+    fn modal_frame(ctx: &egui::Context) -> egui::Frame {
+        egui::Frame::popup(&ctx.style_of(ctx.theme()))
+            .inner_margin(egui::Margin::same(MODAL_MARGIN))
+    }
+
     /// Errors as a modal that has to be dismissed, not a line in the status bar.
     ///
     /// The status line was there and was not enough: the export refusal drew into it and
@@ -468,22 +482,24 @@ impl App {
         let Some(message) = self.error.clone() else {
             return;
         };
-        let response = egui::Modal::new(egui::Id::new("error-modal")).show(ctx, |ui| {
-            ui.set_max_width(420.0);
-            ui.heading("That did not work");
-            ui.add_space(8.0);
-            ui.label(message);
-            ui.add_space(12.0);
-            ui.horizontal(|ui| {
-                // Right-aligned, where the confirming button belongs on every platform
-                // this ships to.
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.button("OK").clicked()
+        let response = egui::Modal::new(egui::Id::new("error-modal"))
+            .frame(Self::modal_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading("That did not work");
+                ui.add_space(8.0);
+                ui.label(message);
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    // Right-aligned, where the confirming button belongs on every platform
+                    // this ships to.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.button("OK").clicked()
+                    })
+                    .inner
                 })
                 .inner
-            })
-            .inner
-        });
+            });
 
         // Escape and a click outside dismiss it too, which `should_close` folds in.
         if response.inner || response.should_close() {
@@ -726,92 +742,95 @@ impl App {
         };
 
         let mut close = false;
-        egui::Modal::new(egui::Id::new("run-progress")).show(ctx, |ui| {
-            ui.set_width(400.0);
-            ui.heading(headline.trim());
-            if let Some(detail) = &detail {
-                ui.add_space(4.0);
-                ui.label(egui::RichText::new(detail).weak());
-            }
-            ui.add_space(10.0);
-
-            for (index, stage) in RUN_STAGES.iter().enumerate() {
-                ui.horizontal(|ui| {
-                    let (state, colour) = match index.cmp(&current) {
-                        std::cmp::Ordering::Less => ("done", ui.visuals().selection.bg_fill),
-                        std::cmp::Ordering::Equal => ("now", ui.visuals().strong_text_color()),
-                        std::cmp::Ordering::Greater => ("todo", ui.visuals().weak_text_color()),
-                    };
-                    phase_marker(ui, state, colour);
-                    ui.add_space(6.0);
-
-                    let label = egui::RichText::new(*stage);
-                    ui.label(match index.cmp(&current) {
-                        std::cmp::Ordering::Equal => label.strong(),
-                        std::cmp::Ordering::Greater => label.weak(),
-                        std::cmp::Ordering::Less => label,
-                    });
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some((done, total)) = progress.filter(|_| index == current) {
-                            let fraction = if total == 0 {
-                                0.0
-                            } else {
-                                done as f32 / total as f32
-                            };
-                            ui.add(
-                                egui::ProgressBar::new(fraction)
-                                    .desired_width(170.0)
-                                    .text(format!("{done}/{total}")),
-                            );
-                        } else if let Some(took) = times[index] {
-                            ui.label(
-                                egui::RichText::new(format!("{:.0}s", took.as_secs_f32())).weak(),
-                            );
-                        }
-                    });
-                });
-                ui.add_space(6.0);
-            }
-
-            ui.add_space(4.0);
-            ui.separator();
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(format!("elapsed {}", clock(elapsed))).strong());
-                if let Shown::Running(shared) = &shown
-                    && shared.cancel_requested()
-                {
-                    ui.label(egui::RichText::new("· stopping after this frame").weak());
+        egui::Modal::new(egui::Id::new("run-progress"))
+            .frame(Self::modal_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width(400.0);
+                ui.heading(headline.trim());
+                if let Some(detail) = &detail {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(detail).weak());
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    match &shown {
-                        Shown::Running(shared) => {
-                            let cancelling = shared.cancel_requested();
-                            let label = if cancelling {
-                                "Cancelling…"
-                            } else {
-                                "Cancel"
-                            };
-                            if ui
-                                .add_enabled(!cancelling, egui::Button::new(label))
-                                .clicked()
-                            {
-                                shared.cancel();
+                ui.add_space(10.0);
+
+                for (index, stage) in RUN_STAGES.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        let (state, colour) = match index.cmp(&current) {
+                            std::cmp::Ordering::Less => ("done", ui.visuals().selection.bg_fill),
+                            std::cmp::Ordering::Equal => ("now", ui.visuals().strong_text_color()),
+                            std::cmp::Ordering::Greater => ("todo", ui.visuals().weak_text_color()),
+                        };
+                        phase_marker(ui, state, colour);
+                        ui.add_space(6.0);
+
+                        let label = egui::RichText::new(*stage);
+                        ui.label(match index.cmp(&current) {
+                            std::cmp::Ordering::Equal => label.strong(),
+                            std::cmp::Ordering::Greater => label.weak(),
+                            std::cmp::Ordering::Less => label,
+                        });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if let Some((done, total)) = progress.filter(|_| index == current) {
+                                let fraction = if total == 0 {
+                                    0.0
+                                } else {
+                                    done as f32 / total as f32
+                                };
+                                ui.add(
+                                    egui::ProgressBar::new(fraction)
+                                        .desired_width(170.0)
+                                        .text(format!("{done}/{total}")),
+                                );
+                            } else if let Some(took) = times[index] {
+                                ui.label(
+                                    egui::RichText::new(format!("{:.0}s", took.as_secs_f32()))
+                                        .weak(),
+                                );
                             }
-                        }
-                        // Dismissed by hand, never automatically: the timings are only
-                        // here, and a dialog that closes itself takes them away exactly
-                        // when someone looks up to read them.
-                        Shown::Finished => {
-                            if ui.button("Close").clicked() {
-                                close = true;
-                            }
-                        }
+                        });
+                    });
+                    ui.add_space(6.0);
+                }
+
+                ui.add_space(4.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("elapsed {}", clock(elapsed))).strong());
+                    if let Shown::Running(shared) = &shown
+                        && shared.cancel_requested()
+                    {
+                        ui.label(egui::RichText::new("· stopping after this frame").weak());
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        match &shown {
+                            Shown::Running(shared) => {
+                                let cancelling = shared.cancel_requested();
+                                let label = if cancelling {
+                                    "Cancelling…"
+                                } else {
+                                    "Cancel"
+                                };
+                                if ui
+                                    .add_enabled(!cancelling, egui::Button::new(label))
+                                    .clicked()
+                                {
+                                    shared.cancel();
+                                }
+                            }
+                            // Dismissed by hand, never automatically: the timings are only
+                            // here, and a dialog that closes itself takes them away exactly
+                            // when someone looks up to read them.
+                            Shown::Finished => {
+                                if ui.button("Close").clicked() {
+                                    close = true;
+                                }
+                            }
+                        }
+                    });
                 });
             });
-        });
 
         if close {
             self.run_summary = None;
