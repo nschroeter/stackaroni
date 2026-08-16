@@ -14,8 +14,12 @@
 # `phys_footprint` is what Activity Monitor calls "Memory": dirty + compressed,
 # excluding clean file-backed pages. That is the honest figure for this pipeline,
 # because the scratch planes are mmapped files whose clean pages inflate RSS
-# without being a claim on RAM — measured 16.5 GB of RSS against 5.6 GB of
+# without being a claim on RAM — measured 16.5 GiB of RSS against 5.6 GiB of
 # footprint after a run, a 3x difference in what you would report.
+#
+# **The GB columns below are GiB (2^30); `docs/eval-log.md` quotes 10^9.** Convert
+# before comparing the two. Not doing so turned a 1.50 GB gap into a reported
+# 0.70 GB one, and the wrong number then got an explanation built on top of it.
 #
 # Read through `-j` (JSON), never the text output: the text form switches to whole
 # gigabytes above 10 GB and *rounds*, so a process holding 10.6 GiB prints "11 GB".
@@ -27,7 +31,7 @@
 #
 # `phys_footprint_peak` is a kernel-tracked high-water mark, so it cannot slip
 # between samples. Do not compute the peak from the sampled column: at 1 Hz that
-# missed 1.1 GB of a 10.8 GB peak on a 33-frame run, because the maximum falls
+# missed 1.11 GiB of a 10.80 GiB peak on a 33-frame run, because the maximum falls
 # inside a stage rather than at a boundary.
 #
 # See the T18 row in `docs/eval-log.md` for the measurements this produced.
