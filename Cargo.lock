@@ -3631,7 +3631,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stackaroni-app"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "eframe",
  "fs4",
@@ -3649,7 +3649,7 @@ dependencies = [
 
 [[package]]
 name = "stackaroni-cli"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -3659,7 +3659,7 @@ dependencies = [
 
 [[package]]
 name = "stackaroni-core"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "bytemuck",
  "memmap2",

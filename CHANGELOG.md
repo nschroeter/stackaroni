@@ -16,7 +16,7 @@ Sections in a release, all optional except the first line: 🚀 Features, 🩹 F
 `crates/core/tests/changelog.rs` fails the build if the current version has no section
 here, for the same reason `parameters_doc.rs` exists.
 
-## [Unreleased]
+## [1.0.3] — 2026-08-16
 
 ### 🔬 Quality
 
