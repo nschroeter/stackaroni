@@ -82,6 +82,20 @@ const THUMBNAIL_HEIGHT: f32 = 88.0;
 /// slider room, so the panel grew by twice this when it was added.
 const PANEL_MARGIN: i8 = 12;
 
+/// Size of the parameter panel's title.
+///
+/// Body text is 12.5 and the section headings are that weight-adjusted, so the title
+/// needs to sit above them without reaching for `heading` at 18, which on a 344 px panel
+/// reads as a page title rather than a panel one.
+const PANEL_TITLE_SIZE: f32 = 16.0;
+
+/// Gap below the title, before the first section.
+///
+/// Wider than the gap between sections: the title governs everything under it, so the
+/// break after it should be the largest in the panel or the first section looks like part
+/// of the heading.
+const PANEL_TITLE_SPACING: f32 = 26.0;
+
 /// Vertical gap between sections of the parameter panel.
 ///
 /// Registration, focus measure, weight refinement and fusion are four separate stages,
@@ -1286,7 +1300,11 @@ impl App {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Parameters").strong());
+                        ui.label(
+                            egui::RichText::new("Parameters")
+                                .size(PANEL_TITLE_SIZE)
+                                .strong(),
+                        );
                         // Right-aligned, and dead once nothing has moved: the point is
                         // getting back to the rated configuration without having to
                         // remember eight numbers.
@@ -1301,19 +1319,19 @@ impl App {
                             }
                         });
                     });
-                    ui.add_space(6.0);
+                    ui.add_space(PANEL_TITLE_SPACING);
 
                     let p = &mut self.params;
 
-                    ui.label("Registration");
+                    ui.label(egui::RichText::new("Registration").strong());
                     ui.add(egui::Slider::new(&mut p.registration_level, 0..=5).text("level"));
                     ui.add_space(SECTION_SPACING);
 
-                    ui.label("Focus measure");
+                    ui.label(egui::RichText::new("Focus measure").strong());
                     ui.add(egui::Slider::new(&mut p.focus_radius, 1..=16).text("radius"));
                     ui.add_space(SECTION_SPACING);
 
-                    ui.label("Weight refinement");
+                    ui.label(egui::RichText::new("Weight refinement").strong());
                     ui.add(egui::Slider::new(&mut p.guide_radius, 1..=16).text("guide radius"));
                     ui.add(
                         egui::Slider::new(&mut p.guide_epsilon, 1e-5..=1e-1)
@@ -1330,7 +1348,7 @@ impl App {
                     });
                     ui.add_space(SECTION_SPACING);
 
-                    ui.label("Fusion");
+                    ui.label(egui::RichText::new("Fusion").strong());
                     // Only the selection rule reads it; blend has no salience window.
                     if let FusionKind::Select { salience_radius } = &mut p.fusion {
                         ui.add(egui::Slider::new(salience_radius, 0..=4).text("salience radius"));
