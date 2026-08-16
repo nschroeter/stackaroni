@@ -23,6 +23,16 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
+# Compiles `packaging/icon/stackaroni.ico` into the executable, so Explorer draws it for
+# the .exe itself — see build.rs.
+#
+# Gated on `cfg(windows)`, which for a build-dependency means the *host*. That is the
+# right gate here and not a mistake: the resource compiler it drives is `rc.exe` from the
+# Windows SDK, so this only ever works on a Windows host anyway, and the release workflow
+# builds each platform on its own runner rather than cross-compiling.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
 # `muda` builds the menu bar; the two `objc2` crates are only there to keep AppKit from
 # renaming the application menu back to the process name — see `retitle_app_menu`. Both
 # are already in the tree via `eframe`, which reaches for AppKit the same way and for the

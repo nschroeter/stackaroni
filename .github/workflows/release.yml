@@ -133,12 +133,24 @@ jobs:
         run: |
           set -euo pipefail
           app="dist/Stackaroni.app"
-          mkdir -p "$app/Contents/MacOS"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
           cp target/release/stackaroni-app "$app/Contents/MacOS/stackaroni-app"
           sed "s/@VERSION@/${{ needs.version.outputs.version }}/g" \
             packaging/macos/Info.plist > "$app/Contents/Info.plist"
           # Fails the build rather than shipping a bundle macOS will refuse to open.
           plutil -lint "$app/Contents/Info.plist"
+
+          # `sips` and `iconutil` are both in the macOS image, so the `.icns` is built
+          # here rather than committed: one PNG in the repository, every size derived.
+          mkdir -p Stackaroni.iconset
+          for size in 16 32 128 256 512; do
+            sips -z $size $size packaging/icon/stackaroni.png \
+              --out "Stackaroni.iconset/icon_${size}x${size}.png" > /dev/null
+            sips -z $((size * 2)) $((size * 2)) packaging/icon/stackaroni.png \
+              --out "Stackaroni.iconset/icon_${size}x${size}@2x.png" > /dev/null
+          done
+          iconutil -c icns Stackaroni.iconset -o "$app/Contents/Resources/AppIcon.icns"
+          ls -l "$app/Contents/Resources/AppIcon.icns"
 
       - name: Stage the archive contents
         shell: bash

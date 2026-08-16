@@ -7,8 +7,9 @@
   the Apple logo. Without a bundle it draws the process name instead — `stackaroni-app` —
   which is why `crates/app/src/main.rs` carries a workaround for the un-bundled case.
 
-  Deliberately no CFBundleIconFile: there is no icon yet, and naming one that does not
-  exist gets a generic icon plus a console warning rather than the generic icon alone.
+  CFBundleIconFile names AppIcon.icns, which release.yml builds from
+  `packaging/icon/stackaroni.png` with sips and iconutil and drops into
+  Contents/Resources. The `.icns` extension is omitted here by convention; both work.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -21,6 +22,8 @@
 	<string>io.github.nschroeter.stackaroni</string>
 	<key>CFBundleExecutable</key>
 	<string>stackaroni-app</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

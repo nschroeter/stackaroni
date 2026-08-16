@@ -16,6 +16,15 @@ Sections in a release, all optional except the first line: 🚀 Features, 🩹 F
 `crates/core/tests/changelog.rs` fails the build if the current version has no section
 here, for the same reason `parameters_doc.rs` exists.
 
+## [Unreleased]
+
+### 🚀 Features
+
+**icon** — an app icon: a mantis over three stacked planes. `AppIcon.icns` in the macOS
+bundle, built from one PNG at release time; embedded as the window and taskbar icon on
+Windows and Linux; and compiled into `stackaroni-app.exe` as a resource so Explorer draws
+it for the executable too. `packaging/icon/README.md` has the provenance.
+
 ## [1.0.0] — 2026-08-16
 
 First release. A complete classical focus-stacking pipeline with a GUI, a headless runner,

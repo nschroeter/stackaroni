@@ -53,7 +53,9 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Stackaroni",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+            viewport: window_icon(
+                egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
+            ),
             ..Default::default()
         },
         Box::new(|cc| {
@@ -94,6 +96,32 @@ const PANEL_MARGIN: i8 = 12;
 /// [`retitle_app_menu`].
 #[cfg(target_os = "macos")]
 const APP_MENU_TITLE: &str = "Stackaroni";
+
+/// The window and taskbar icon, at the size those are actually drawn.
+///
+/// 256 px rather than the 1024 px master: this is decoded into RGBA at every startup and
+/// then drawn at 32-64 px, so the full-size artwork would cost 4 MB of pixels to throw
+/// away. The master stays the source for `AppIcon.icns`, which macOS *does* draw large.
+const WINDOW_ICON: &[u8] = include_bytes!("../../../packaging/icon/stackaroni-256.png");
+
+/// Attach [`WINDOW_ICON`], or carry on without it.
+///
+/// Windows and Linux take their titlebar and taskbar icon from here. macOS ignores it
+/// entirely and uses the bundle's `CFBundleIconFile`, so on that platform this is a no-op
+/// that costs one decode — not worth a `cfg` to skip, and worth keeping for anyone
+/// running the binary outside a bundle.
+///
+/// A failure here is not worth refusing to start over: the icon is decoration, and the
+/// alternative to a default icon is no window at all.
+fn window_icon(viewport: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    match eframe::icon_data::from_png_bytes(WINDOW_ICON) {
+        Ok(icon) => viewport.with_icon(icon),
+        Err(e) => {
+            eprintln!("window icon failed to decode, continuing without it: {e}");
+            viewport
+        }
+    }
+}
 
 /// Whether this process was launched from inside an `.app` bundle.
 ///
