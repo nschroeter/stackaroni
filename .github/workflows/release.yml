@@ -208,16 +208,33 @@ jobs:
           cat SHA256SUMS
 
       # Draft, so the notes can be read and edited before anyone can download this.
-      # `--generate-notes` is left off deliberately: the draft's own UI has a
-      # "Generate release notes" button, and combining it with a notes file is one
-      # more thing that would only be found broken during a release.
+      #
+      # Notes are the CHANGELOG section for this version, followed by the fixed
+      # download and installation block. `--generate-notes` is left off deliberately:
+      # it lists commit subjects, which for a repository with one author and no pull
+      # requests is strictly worse than the hand-written section — see the note at the
+      # top of CHANGELOG.md.
       - name: Open the draft release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          sed "s/@VERSION@/${VERSION}/g" .github/release-notes.md > notes.md
+
+          # Print from the `## [VERSION]` heading up to the next `## [` heading. The
+          # `version` job has already established that this version matches the tag.
+          awk -v v="[${VERSION}]" '
+            /^## \[/ { inside = ($2 == v) ; if (inside) next }
+            inside
+          ' CHANGELOG.md > notes.md
+
+          if [ ! -s notes.md ]; then
+            echo "::error::CHANGELOG.md has no section for ${VERSION}"
+            exit 1
+          fi
+
+          sed "s/@VERSION@/${VERSION}/g" .github/release-notes.md >> notes.md
+          cat notes.md
           gh release create "${GITHUB_REF_NAME}" \
             --draft \
             --title "Stackaroni ${VERSION}" \

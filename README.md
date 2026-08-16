@@ -26,6 +26,7 @@ tip to the far markings](docs/images/screenshot-result.jpg)
 [**Latest release**](https://github.com/nschroeter/stackaroni/releases/latest) — macOS
 (Apple Silicon), Linux x86-64, Windows x86-64. Each archive holds the GUI, the
 `stackaroni-cli` headless runner and the docs, and `SHA256SUMS` covers all three.
+[`CHANGELOG.md`](CHANGELOG.md) has what changed in each one.
 
 **The builds are not code-signed**, so both systems object the first time. On macOS,
 right-click `Stackaroni.app` → **Open** → **Open** (or

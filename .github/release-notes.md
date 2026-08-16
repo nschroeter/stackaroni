@@ -1,6 +1,6 @@
-Focus stacking for insect macro photography. `@VERSION@`.
+---
 
-## Downloads
+## 📦 Downloads
 
 | File | For |
 |---|---|
@@ -11,7 +11,7 @@ Focus stacking for insect macro photography. `@VERSION@`.
 Each archive holds the GUI, the `stackaroni-cli` headless runner, `README.md`,
 `PARAMETERS.md` and the licence. `SHA256SUMS` covers all three.
 
-## Running it
+## ▶️ Running it
 
 **The builds are not code-signed.** There is no Apple Developer ID or Windows
 certificate behind this, so both systems will object the first time.
@@ -28,8 +28,6 @@ anyway**.
 
 **Linux** — the archive holds plain binaries; `chmod +x` if your unpacker dropped the
 bit. Needs the usual windowing and GL runtime libraries, listed in the README.
-
-## Notes
 
 Built for Apple Silicon only on macOS; Intel Macs need a build from source. The Linux
 binary is linked against the runner's glibc and will not start on older distributions.

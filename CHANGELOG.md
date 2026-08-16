@@ -1,0 +1,80 @@
+# Changelog
+
+Hand-written, one section per release. The section whose heading matches the workspace
+version becomes the GitHub release notes — `.github/workflows/release.yml` extracts it and
+appends the download and installation block from `.github/release-notes.md`.
+
+**Hand-written on purpose.** Generating this from commit subjects was considered and
+rejected: this repository has one author and no pull requests, so a generator would
+produce a list of subject lines under headings, and the part worth reading — what the
+output looks like now, and what a change cost — lives in commit bodies and in
+`docs/eval-log.md` where no generator can reach it.
+
+Sections in a release, all optional except the first line: 🚀 Features, 🩹 Fixes,
+🔬 Quality, 🧹 Removed, 📖 Docs. Scope in bold, then what changed.
+
+`crates/core/tests/changelog.rs` fails the build if the current version has no section
+here, for the same reason `parameters_doc.rs` exists.
+
+## [1.0.0] — 2026-08-16
+
+First release. A complete classical focus-stacking pipeline with a GUI, a headless runner,
+and a record of every measurement behind it.
+
+### 🚀 Features
+
+**pipeline** — registration → focus measurement → weight estimation → fusion, each stage
+a swappable trait. Phase correlation with a log-polar scale estimate (Kuglin & Hines 1975;
+Reddy & Chatterji 1996), windowed-Laplacian focus measurement, guided-filter weight
+refinement (He, Sun & Tang), and Laplacian-pyramid fusion (Burt & Adelson 1983) combined
+per level by the selection rule of Burt & Kolczynski (1993).
+
+**app** — filmstrip, pan-and-zoom preview for judging sharpness frame by frame, the eight
+exposed parameters, run and export. Native macOS menu bar with the parameter reference and
+an About dialog.
+
+**cli** — headless runs over one stack or a whole test set, with `--debug-out` writing
+per-stage diagnostics: alignment overlay, focus heatmaps, the argmax label field, weight
+maps and a fused preview. That is how a problem gets localised to a stage.
+
+**streaming** — a 100-frame 50 MP stack never sits in memory at once. Frames are read from
+their TIFFs on demand and intermediates are mmapped scratch planes, so a stack costs file
+handles rather than 60 GB. A full run at that size takes about 4½ minutes.
+
+**cancellation** — every stage takes a `RunControl` carrying progress and a cancel flag,
+checked at per-frame granularity. The final TIFF write is never interrupted: a truncated
+file that looks like a real output is worse than finishing.
+
+### 🔬 Quality
+
+Rated by eye against the four-point checklist in `CLAUDE.md`, on the fixed test stacks.
+There is no automated ground truth for a photograph, so these are human scores, and
+`docs/eval-log.md` carries the reasoning behind each one.
+
+| Stack | Score |
+|---|---|
+| synthetic_50 | 5 / 5 |
+| ruler | 5 / 5 |
+| blossom | 5 / 5 |
+
+**Output is never cropped.** The full field of view survives the pipeline; frames compete
+only inside the region they can actually fill, so border-replicated pixels cannot be
+selected without costing framing. The remaining softness in blossom's upper-right corner
+is the capture — no input frame resolves it.
+
+A hash gate pins one stack's fused output byte-for-byte, so a change claiming to be a pure
+speedup can be checked rather than believed.
+
+### 📖 Docs
+
+**eval-log** — every experiment, its score and its reasoning, including the failures:
+wavelet-domain stacking built and removed, a published fix for its defect measured inert
+and discarded, depth-map weights rated and dropped, multi-scale focus measurement shown to
+change nothing. The negative results are most of the value — they are what stops the same
+idea being rebuilt.
+
+**PARAMETERS.md** — every exposed parameter, which stage owns it, and what moving it
+costs, with measured effects where they were measured.
+
+**algorithms.md** — the reviewed algorithm overview, formulas and citations each stage
+implements.
