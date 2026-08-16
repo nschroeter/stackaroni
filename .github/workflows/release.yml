@@ -194,14 +194,17 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # Named by extension rather than `./*`: the redirection creates SHA256SUMS
-      # before `sha256sum` runs, and a glob that picked it up would checksum an
-      # empty file and list it in itself.
+      # Named by extension rather than `*`: the redirection creates SHA256SUMS before
+      # `sha256sum` runs, and a glob that picked it up would checksum an empty file
+      # and list it in itself.
+      #
+      # No `./` prefix on the globs — it lands in the file and then in every line of
+      # `sha256sum -c` output a user ever runs against this.
       - name: Checksums
         run: |
           set -euo pipefail
           cd dist
-          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
+          sha256sum *.tar.gz *.zip > SHA256SUMS
           cat SHA256SUMS
 
       # Draft, so the notes can be read and edited before anyone can download this.
