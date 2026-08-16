@@ -23,6 +23,41 @@ const OUT_ROWS_PER_STRIP: u32 = 64;
 /// Roughly how many input rows the strip cache is allowed to hold.
 const CACHE_ROWS: u32 = 256;
 
+/// The largest single chunk the decoder is allowed to allocate for, in bytes.
+///
+/// A 350 MP RGB16 frame in one strip, well past anything this is built for, and small
+/// enough that a corrupt header claiming absurd dimensions is refused rather than
+/// turned into an allocation.
+const MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Decoder limits for a file whose largest chunk is `chunk_bytes`.
+///
+/// **This exists because the crate's defaults reject legitimate files.** `tiff`'s
+/// `Limits::default()` caps a chunk at 256 MB, which is fine for the stacks here — they
+/// are one row per strip — and wrong for any exporter that writes the image as a single
+/// strip, which is common. A 48 MP RGB16 frame is 288 MB in one strip, so every frame
+/// fails with "decoder limits exceeded" before a pixel is read. Reported from a Windows
+/// build, reproduced immediately on macOS: nothing about it is platform-specific.
+///
+/// Sized to the file rather than `Limits::unlimited()`, so a corrupt header still cannot
+/// ask for an arbitrary allocation. The slack is because the crate compares an element
+/// *count* against these byte budgets after dividing by the sample size, and an exact
+/// fit lands on the boundary.
+fn chunk_limits(chunk_bytes: u64) -> Option<tiff::decoder::Limits> {
+    if chunk_bytes > MAX_CHUNK_BYTES {
+        return None;
+    }
+    // Never *below* the crate's own defaults: this is only ever meant to raise the
+    // ceiling for a large chunk, not to tighten it for a small one.
+    let mut limits = tiff::decoder::Limits::default();
+    let budget = (chunk_bytes + (1 << 20)).max(limits.decoding_buffer_size as u64);
+    // Field-by-field because `Limits` is `#[non_exhaustive]`, so a struct expression
+    // does not compile from outside the crate. `ifd_value_size` keeps its default.
+    limits.decoding_buffer_size = budget as usize;
+    limits.intermediate_buffer_size = budget as usize;
+    Some(limits)
+}
+
 /// Read a frame's geometry without decoding any pixels.
 pub fn probe(path: &Path) -> Result<FrameInfo> {
     Ok(FrameReader::open(path)?.info())
@@ -69,6 +104,17 @@ impl FrameReader {
                 found: "zero-height strips".into(),
             });
         }
+
+        // After the geometry is known, because the budget is derived from it, and before
+        // any pixels are read, because that is what it governs.
+        let chunk_bytes = width as u64 * rows_per_strip as u64 * 3 * 2;
+        let Some(limits) = chunk_limits(chunk_bytes) else {
+            return Err(Error::UnsupportedFormat {
+                path: path.to_path_buf(),
+                found: format!("{} MB in a single chunk", chunk_bytes / (1 << 20)),
+            });
+        };
+        let decoder = decoder.with_limits(limits);
 
         Ok(Self {
             path: path.to_path_buf(),
@@ -234,6 +280,78 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    /// Write a TIFF whose every row lives in one strip, the way many exporters do.
+    ///
+    /// `write_rgb16_srgb` cannot produce this — it strips at [`OUT_ROWS_PER_STRIP`] —
+    /// and the shape is the whole point of these tests, so the encoder is driven here
+    /// directly.
+    fn write_single_strip(path: &Path, width: u32, height: u32) {
+        let file = File::create(path).unwrap();
+        let mut encoder = TiffEncoder::new(BufWriter::new(file)).unwrap();
+        let mut image = encoder
+            .new_image::<colortype::RGB16>(width, height)
+            .unwrap();
+        image.rows_per_strip(height).unwrap();
+
+        let data: Vec<u16> = (0..height)
+            .flat_map(|y| {
+                (0..width).flat_map(move |x| (0..3).map(move |c| ((x + y + c) % 65536) as u16))
+            })
+            .collect();
+        image.write_data(&data).unwrap();
+    }
+
+    /// A frame in one strip decodes. Regression: it used to fail outright once the
+    /// strip passed 256 MB, which is a 48 MP frame — reported from the wild.
+    ///
+    /// Small here on purpose. The size that actually tripped the limit cannot go in a
+    /// test that runs on every push, so the arithmetic that decides the budget is
+    /// tested separately below, and this covers the decode path itself.
+    #[test]
+    fn reads_a_single_strip_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("single.tif");
+        write_single_strip(&path, 64, 48);
+
+        let mut reader = FrameReader::open(&path).unwrap();
+        assert_eq!(reader.info().height, 48);
+        assert_eq!(reader.rows_per_strip, 48, "fixture is not a single strip");
+
+        let mut got = vec![0f32; reader.info().row_len() * 48];
+        reader.read_rows(0, 48, &mut got).unwrap();
+        assert!(got.iter().all(|v| v.is_finite()));
+    }
+
+    /// The budget clears what the crate's own default would have rejected.
+    ///
+    /// 8000x6000 RGB16 in one strip is 288 MB, against a 256 MB default — the exact
+    /// shape of the reported failure, asserted without allocating 288 MB.
+    #[test]
+    fn a_large_single_chunk_is_allowed_where_the_default_refuses_it() {
+        let chunk = 8000u64 * 6000 * 3 * 2;
+        let default = tiff::decoder::Limits::default().decoding_buffer_size as u64;
+        assert!(chunk > default, "fixture no longer exceeds the default");
+
+        let limits = chunk_limits(chunk).expect("288 MB is within the cap");
+        assert!(limits.decoding_buffer_size as u64 > chunk);
+        assert!(limits.intermediate_buffer_size as u64 > chunk);
+    }
+
+    /// A small file does not get a *smaller* budget than the crate's default.
+    #[test]
+    fn a_small_chunk_keeps_the_default_budget() {
+        let default = tiff::decoder::Limits::default();
+        let limits = chunk_limits(4096).unwrap();
+        assert_eq!(limits.decoding_buffer_size, default.decoding_buffer_size);
+    }
+
+    /// Sized to the file, so a corrupt header cannot ask for an arbitrary allocation.
+    #[test]
+    fn an_absurd_chunk_is_refused() {
+        assert!(chunk_limits(MAX_CHUNK_BYTES).is_some());
+        assert!(chunk_limits(MAX_CHUNK_BYTES + 1).is_none());
     }
 
     #[test]

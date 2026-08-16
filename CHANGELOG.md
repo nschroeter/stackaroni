@@ -16,6 +16,25 @@ Sections in a release, all optional except the first line: 🚀 Features, 🩹 F
 `crates/core/tests/changelog.rs` fails the build if the current version has no section
 here, for the same reason `parameters_doc.rs` exists.
 
+## [1.0.2] — 2026-08-16
+
+### 🩹 Fixes
+
+**tiff** — frames written as a *single strip* failed to load at all, with "decoding
+failed: decoder limits exceeded" on every frame. The `tiff` crate caps one chunk at
+256 MB by default, which a 48 MP 16-bit RGB frame exceeds the moment an exporter writes
+the image in one piece rather than in strips. The stacks this was developed against are
+one row per strip, so nothing here ever hit it. Reported against the Windows build and
+reproduced immediately on macOS — it was never platform-specific.
+
+The budget is now sized to the file rather than removed, so a corrupt header still
+cannot ask for an arbitrary allocation.
+
+**Single-strip frames cost more memory**, unavoidably: a strip is the decoder's unit, so
+the whole frame is resident while its rows are read. Measured on eight 48 MP frames,
+peak RSS 14.4 GB against 8.5 GB for the same pixels in 64-row strips. Re-exporting with
+strips is worth it if memory is tight.
+
 ## [1.0.1] — 2026-08-16
 
 An icon, and nothing else. **No pipeline change: fused output is identical to 1.0.0**, so
