@@ -75,6 +75,26 @@ const PLACEHOLDER_FRAMES: usize = 8;
 /// Height of a filmstrip entry. Thumbnails are fitted inside this, letterboxed.
 const THUMBNAIL_HEIGHT: f32 = 88.0;
 
+/// Inset between the parameter panel's contents and its edges.
+///
+/// Without it the heading starts hard against the panel border and the sliders run into
+/// the opposite one. [`PARAMETERS_PANEL_WIDTH`] carries this: the margin comes out of the
+/// slider room, so the panel grew by twice this when it was added.
+const PANEL_MARGIN: i8 = 12;
+
+/// Vertical gap between sections of the parameter panel.
+///
+/// Registration, focus measure, weight refinement and fusion are four separate stages,
+/// and the gap between them has to beat the gap between rows *inside* them or the
+/// headings do not read as breaks.
+///
+/// Measured rather than guessed, because the first attempt at this failed. Every row is
+/// about 20 px tall, so a heading is just another row: at 8 px the group gap was 29 px
+/// against 21 px within a group, and at 14 px it was 33.5 against 21 — only 1.6x, which
+/// still looked like one long list of sliders. This puts it near 2x, which is where the
+/// grouping becomes obvious.
+const SECTION_SPACING: f32 = 22.0;
+
 /// Inner padding of the app's modal dialogs.
 ///
 /// egui frames a modal with `Frame::popup`, whose inner margin is `menu_margin` — 6 px,
@@ -98,7 +118,7 @@ const FILMSTRIP_SCROLLBAR_WIDTH: f32 = 12.0;
 /// rendered as "decomposition f". `the_parameter_panel_is_wide_enough_for_its_contents`
 /// measures the real laid-out width against this and fails if a longer label is added
 /// without widening the panel.
-const PARAMETERS_PANEL_WIDTH: f32 = 320.0;
+const PARAMETERS_PANEL_WIDTH: f32 = 344.0;
 
 // There is one pipeline and no chooser. The wavelet method was removed in T17 after
 // rating 2/4/2 against this one's 5/5/5, so `Method` went with it; the app runs
@@ -1245,7 +1265,19 @@ impl App {
         }
     }
 
+    /// Inset from the panel edges, then the real content.
+    ///
+    /// Wrapped rather than applied to the `Panel` itself so that
+    /// `the_parameter_panel_is_wide_enough_for_its_contents` sees the margin: it renders
+    /// this method, and a margin added outside it would steal width the test never
+    /// accounted for — which is exactly the bug that test exists to catch.
     fn parameters(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(PANEL_MARGIN))
+            .show(ui, |ui| self.parameters_inner(ui));
+    }
+
+    fn parameters_inner(&mut self, ui: &mut egui::Ui) {
         // Locked during a run: these are the settings it was started with, and letting
         // them move would show a configuration that does not match what is executing.
         let running = self.running();
@@ -1253,10 +1285,6 @@ impl App {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    ui.add_space(6.0);
-                    ui.separator();
-
-                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("Parameters").strong());
                         // Right-aligned, and dead once nothing has moved: the point is
@@ -1279,11 +1307,11 @@ impl App {
 
                     ui.label("Registration");
                     ui.add(egui::Slider::new(&mut p.registration_level, 0..=5).text("level"));
-                    ui.add_space(8.0);
+                    ui.add_space(SECTION_SPACING);
 
                     ui.label("Focus measure");
                     ui.add(egui::Slider::new(&mut p.focus_radius, 1..=16).text("radius"));
-                    ui.add_space(8.0);
+                    ui.add_space(SECTION_SPACING);
 
                     ui.label("Weight refinement");
                     ui.add(egui::Slider::new(&mut p.guide_radius, 1..=16).text("guide radius"));
@@ -1294,22 +1322,24 @@ impl App {
                     );
                     ui.horizontal(|ui| {
                         ui.label("guide:");
-                        ui.selectable_value(&mut p.guide_space, GuideSpace::Linear, "linear");
-                        ui.selectable_value(
-                            &mut p.guide_space,
-                            GuideSpace::Perceptual,
-                            "perceptual",
-                        );
+                        // Radio buttons rather than `selectable_value`'s highlighted
+                        // pills: the two are mutually exclusive and neither is an action,
+                        // which is what a radio group says and a pair of buttons does not.
+                        ui.radio_value(&mut p.guide_space, GuideSpace::Linear, "linear");
+                        ui.radio_value(&mut p.guide_space, GuideSpace::Perceptual, "perceptual");
                     });
-                    ui.add_space(8.0);
+                    ui.add_space(SECTION_SPACING);
 
                     ui.label("Fusion");
+                    // Only the selection rule reads it; blend has no salience window.
                     if let FusionKind::Select { salience_radius } = &mut p.fusion {
                         ui.add(egui::Slider::new(salience_radius, 0..=4).text("salience radius"));
                     }
-
-                    // The depth of the decomposition every stage above reads.
-                    ui.add_space(8.0);
+                    // Inside the fusion group, because `fusion.rs` is the only thing that
+                    // reads it: `level_count` sets the pyramid's depth and nothing in
+                    // registration, focus measurement or weighting looks at it. It sat
+                    // below a section gap until 2026-08-16, which made it read as an
+                    // unlabelled fifth group belonging to nothing.
                     ui.add(
                         egui::Slider::new(&mut p.pyramid_floor, 8..=128)
                             .text("decomposition floor"),
