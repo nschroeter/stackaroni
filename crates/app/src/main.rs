@@ -75,6 +75,13 @@ const PLACEHOLDER_FRAMES: usize = 8;
 /// Height of a filmstrip entry. Thumbnails are fitted inside this, letterboxed.
 const THUMBNAIL_HEIGHT: f32 = 88.0;
 
+/// Width of the filmstrip's scrollbar.
+///
+/// Twice egui's default solid bar and six times its floating one. It comes out of the
+/// thumbnails, which are letterboxed into a fixed-width panel, so this trades a little
+/// preview size for a bar that can actually be grabbed on a hundred-frame stack.
+const FILMSTRIP_SCROLLBAR_WIDTH: f32 = 12.0;
+
 /// Width of the parameter panel.
 ///
 /// Not a taste decision: the sliders stretch to fill, but each row also carries a fixed
@@ -982,6 +989,15 @@ impl App {
     }
 
     fn filmstrip_inner(&mut self, ui: &mut egui::Ui) {
+        // Solid and always visible, rather than egui's default floating 2 px sliver that
+        // only thickens on hover. With a hundred frames the bar is doing two jobs — it is
+        // the thing you grab, and it is the only indication of where you are in the stack
+        // — and neither works if it is invisible until found. Scoped to this `Ui` so the
+        // parameter panel's own scroll area keeps the default.
+        let scroll = &mut ui.style_mut().spacing.scroll;
+        scroll.floating = false;
+        scroll.bar_width = FILMSTRIP_SCROLLBAR_WIDTH;
+
         ui.add_space(6.0);
         ui.label(egui::RichText::new("Frames").strong());
         ui.add_space(4.0);
