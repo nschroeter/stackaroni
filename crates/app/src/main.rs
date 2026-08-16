@@ -56,13 +56,21 @@ fn main() -> eframe::Result {
             viewport: egui::ViewportBuilder::default().with_inner_size([1280.0, 800.0]),
             ..Default::default()
         },
-        Box::new(|_cc| {
+        Box::new(|cc| {
+            // Only the macOS menu bar needs it.
+            #[cfg(not(target_os = "macos"))]
+            let _ = cc;
             // Before the window is doing anything else. Stale scratch from runs that
             // died or were killed is exactly what eats the headroom the free-space
             // check protects, so the two belong together.
             let reaped = reap::stale(&reap::temp_root());
             Ok(Box::new(App {
                 reaped: (reaped.entries > 0).then_some(reaped),
+                // Here rather than earlier in `main`: AppKit requires the menu to be
+                // installed on the main thread with the app already initialised, and this
+                // closure is the first point where both hold.
+                #[cfg(target_os = "macos")]
+                native_menu: NativeMenu::install(&cc.egui_ctx),
                 ..App::default()
             }))
         }),
@@ -81,6 +89,134 @@ const THUMBNAIL_HEIGHT: f32 = 88.0;
 /// the opposite one. [`PARAMETERS_PANEL_WIDTH`] carries this: the margin comes out of the
 /// slider room, so the panel grew by twice this when it was added.
 const PANEL_MARGIN: i8 = 12;
+
+/// The name shown beside the Apple logo. Not the binary name, deliberately — see
+/// [`retitle_app_menu`].
+#[cfg(target_os = "macos")]
+const APP_MENU_TITLE: &str = "Stackaroni";
+
+/// The macOS menu bar, and the item ids needed to recognise its events.
+///
+/// **Kept alive deliberately.** Dropping [`muda::Menu`] tears the menu down, so it is
+/// held for the process's lifetime rather than built and forgotten in `main`.
+///
+/// egui cannot do this: the bar beside the Apple logo is AppKit's `NSMenu`, and
+/// `init_for_nsapp` replaces the whole main menu — including the default one winit
+/// installs. That is why the application submenu is rebuilt here with Hide and Quit; a
+/// bar carrying only Help would silently cost the standard shortcuts.
+#[cfg(target_os = "macos")]
+struct NativeMenu {
+    _menu: muda::Menu,
+    /// Clicks, forwarded off `muda`'s global channel — see [`NativeMenu::install`].
+    events: std::sync::mpsc::Receiver<muda::MenuEvent>,
+    documentation: muda::MenuId,
+    about: muda::MenuId,
+}
+
+#[cfg(target_os = "macos")]
+impl NativeMenu {
+    /// Build the bar and install it, routing clicks so they wake the UI.
+    ///
+    /// `muda` posts to a global channel that nothing polls until egui next paints, and
+    /// egui is reactive — a menu click produces no egui input, so the About dialog opened
+    /// only when some unrelated repaint came along, about half a second later. An event
+    /// handler replaces that channel rather than adding to it (`MenuEvent::send` picks one
+    /// or the other), so this forwards to a channel of its own and repaints on the way
+    /// past. The `Context` is why this takes `cc` rather than being callable from `main`.
+    fn install(ctx: &egui::Context) -> Option<Self> {
+        use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+        let (tx, events) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        muda::MenuEvent::set_event_handler(Some(move |event| {
+            let _ = tx.send(event);
+            ctx.request_repaint();
+        }));
+
+        let documentation = MenuItem::new("Parameter Documentation", true, None);
+        let about = MenuItem::new("About Stackaroni", true, None);
+
+        let app = Submenu::with_items(
+            APP_MENU_TITLE,
+            true,
+            &[
+                &PredefinedMenuItem::hide(None),
+                &PredefinedMenuItem::hide_others(None),
+                &PredefinedMenuItem::separator(),
+                &PredefinedMenuItem::quit(None),
+            ],
+        )
+        .ok()?;
+        let help = Submenu::with_items("Help", true, &[&documentation, &about]).ok()?;
+
+        let menu = Menu::with_items(&[&app, &help]).ok()?;
+        menu.init_for_nsapp();
+
+        Some(Self {
+            documentation: documentation.id().clone(),
+            about: about.id().clone(),
+            events,
+            _menu: menu,
+        })
+    }
+
+    /// Make the application menu read [`APP_MENU_TITLE`] rather than the process name.
+    ///
+    /// **Why this is not just a `setTitle` at construction.** AppKit draws the application
+    /// menu's label when the main menu is installed, and for a bare `cargo` binary with no
+    /// bundle it draws the process name, `stackaroni-app`. `muda` titles the submenu
+    /// before `init_for_nsapp` calls `setMainMenu:`, so the title is already
+    /// `"Stackaroni"` when the label is drawn from something else — and setting a title
+    /// AppKit considers unchanged does not redraw the bar. Reading it back confirms this:
+    /// every title in the menu says `Stackaroni` while the bar says `stackaroni-app`.
+    ///
+    /// So the title has to genuinely *change*. It is cleared on the first frame and set on
+    /// the next, two run-loop iterations apart so the two cannot coalesce into no change
+    /// at all. That is also, incidentally, why eframe's version works on the menu winit
+    /// installs and would not have worked here: winit leaves that submenu's title empty,
+    /// so eframe's `app_icon::set_title_and_icon_mac` is already setting a new value.
+    ///
+    /// The real fix is shipping an `.app` bundle with a `CFBundleName`, at which point all
+    /// of this can go.
+    fn retitle_app_menu(&self, cleared: &mut bool) {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::NSString;
+
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(menu) = NSApplication::sharedApplication(mtm).mainMenu() else {
+            return;
+        };
+        let Some(app_menu) = menu.itemAtIndex(0).and_then(|item| item.submenu()) else {
+            return;
+        };
+
+        if !*cleared {
+            app_menu.setTitle(&NSString::new());
+            *cleared = true;
+            return;
+        }
+
+        // Every frame after that, but a string comparison on all the ones where nothing
+        // has happened. Cheaper than knowing exactly when AppKit might reassert the name.
+        if app_menu.title().to_string() != APP_MENU_TITLE {
+            app_menu.setTitle(&NSString::from_str(APP_MENU_TITLE));
+        }
+    }
+}
+
+/// Where "Parameter documentation…" points.
+///
+/// The published copy rather than the local file: the menu item is for someone reading
+/// about a control in front of them, and `docs/PARAMETERS.md` on disk is only present in
+/// a source checkout.
+const PARAMETERS_DOC_URL: &str =
+    "https://github.com/nschroeter/stackaroni/blob/main/docs/PARAMETERS.md";
+
+/// Copyright line for the About dialog, matching `LICENSE`.
+const COPYRIGHT: &str = "Copyright © 2026 Niels Schröter";
 
 /// Size of the parameter panel's title.
 ///
@@ -399,6 +535,16 @@ struct App {
     /// What a startup sweep reclaimed, if anything. Reported rather than silent, because
     /// tens of GB disappearing without explanation is worse than a line of text.
     reaped: Option<reap::Reaped>,
+    /// Whether the About dialog is up.
+    about_open: bool,
+
+    /// The macOS menu bar. `None` off macOS, and if AppKit refused it.
+    #[cfg(target_os = "macos")]
+    native_menu: Option<NativeMenu>,
+    /// Whether [`NativeMenu::retitle_app_menu`] has done its one-off clear yet.
+    #[cfg(target_os = "macos")]
+    menu_title_cleared: bool,
+
     /// Where the last export landed, so the status bar can say so.
     exported: Option<std::path::PathBuf>,
     /// Shared with worker threads so a superseded load can be abandoned mid-decode.
@@ -663,7 +809,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll_run(ui.ctx());
         self.poll_export(ui.ctx());
+        self.poll_native_menu(ui.ctx());
         self.error_modal(ui.ctx());
+        self.about_modal(ui.ctx());
         // Collect whatever the decoder finished since the last pass, and keep painting
         // while it works so thumbnails appear as they land rather than all at the end.
         if let Some(stack) = &mut self.stack {
@@ -962,8 +1110,117 @@ impl App {
                     ui.label(egui::RichText::new("no stack loaded").weak());
                 }
             }
+
+            // Windows and Linux have no system menu bar, so the same two items live in
+            // the toolbar there. On macOS they are in the real menu bar and this would be
+            // a duplicate.
+            #[cfg(not(target_os = "macos"))]
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.menu_button("Help", |ui| {
+                    if ui.button("Parameter documentation…").clicked() {
+                        ui.ctx()
+                            .open_url(egui::OpenUrl::new_tab(PARAMETERS_DOC_URL));
+                        ui.close();
+                    }
+                    if ui.button("About").clicked() {
+                        self.about_open = true;
+                        ui.close();
+                    }
+                });
+            });
         });
         ui.add_space(4.0);
+    }
+
+    /// Drain whatever the macOS menu bar reported since the last frame, and keep its
+    /// title from reverting.
+    ///
+    /// `muda` delivers on a channel rather than through egui's event queue, so it has to
+    /// be pumped explicitly. A no-op off macOS.
+    fn poll_native_menu(&mut self, ctx: &egui::Context) {
+        #[cfg(not(target_os = "macos"))]
+        let _ = ctx;
+        #[cfg(target_os = "macos")]
+        {
+            let Some(menu) = &self.native_menu else {
+                return;
+            };
+            // The retitle needs a second frame to set the name it cleared, and egui is
+            // reactive: without this the app can idle after frame one and leave the menu
+            // bar blank. One extra frame at startup, then never again.
+            if !self.menu_title_cleared {
+                ctx.request_repaint();
+            }
+            menu.retitle_app_menu(&mut self.menu_title_cleared);
+            let (documentation, about) = (menu.documentation.clone(), menu.about.clone());
+            // Collected before acting on any of it: the handlers below take `&mut self`,
+            // and `menu` is borrowed from it.
+            let clicks: Vec<_> = menu.events.try_iter().collect();
+            for event in clicks {
+                if event.id == documentation {
+                    self.open_parameter_documentation();
+                } else if event.id == about {
+                    self.about_open = true;
+                }
+            }
+        }
+    }
+
+    /// The published parameter reference, in a browser.
+    ///
+    /// macOS only, because the native menu bar is the only caller: elsewhere the same item
+    /// lives in the toolbar, where `open_url` has a `Context` to work with. The `open`
+    /// command below is macOS-only too, so this is not a gate over portable code.
+    #[cfg(target_os = "macos")]
+    fn open_parameter_documentation(&self) {
+        // `webbrowser` via egui would need a `Context`; this path has none, and the OS
+        // opener is what `open_url` ends up calling anyway.
+        let _ = std::process::Command::new("open")
+            .arg(PARAMETERS_DOC_URL)
+            .spawn();
+    }
+
+    /// The About dialog: what this is, whose it is, and what you may do with it.
+    fn about_modal(&mut self, ctx: &egui::Context) {
+        if !self.about_open {
+            return;
+        }
+        let response = egui::Modal::new(egui::Id::new("about"))
+            .frame(Self::modal_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.label(
+                    egui::RichText::new("Stackaroni")
+                        .size(PANEL_TITLE_SIZE)
+                        .strong(),
+                );
+                ui.add_space(2.0);
+                // From Cargo.toml rather than a literal, so `cargo set-version` or a hand
+                // edit reaches the dialog and cannot be forgotten here.
+                ui.label(
+                    egui::RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).weak(),
+                );
+
+                ui.add_space(12.0);
+                ui.label("Focus stacking for insect macro photography.");
+
+                ui.add_space(12.0);
+                ui.label(COPYRIGHT);
+                ui.label("Released under the MIT licence.");
+
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.button("OK").clicked()
+                    })
+                    .inner
+                })
+                .inner
+            });
+
+        if response.inner || response.should_close() {
+            self.about_open = false;
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {

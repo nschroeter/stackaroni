@@ -8,7 +8,7 @@ license.workspace = true
 eframe = "0.36.1"
 fs4 = "1.1.0"
 rfd = "0.17.2"
-stackaroni-core = { version = "0.1.0", path = "../core" }
+stackaroni-core = { path = "../core" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
@@ -22,3 +22,13 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+# `muda` builds the menu bar; the two `objc2` crates are only there to keep AppKit from
+# renaming the application menu back to the process name — see `retitle_app_menu`. Both
+# are already in the tree via `eframe`, which reaches for AppKit the same way and for the
+# same reason, so this adds versions rather than dependencies.
+[target.'cfg(target_os = "macos")'.dependencies]
+muda = "0.19.3"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
+objc2-foundation = { version = "0.3", features = ["NSString"] }
