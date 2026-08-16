@@ -75,9 +75,10 @@ stackaroni-cli --test-set test-data --output out/ --debug-out debug/
 label field, weight maps and a fused preview. That is how problems get localised to a
 stage without reading the code.
 
-Parameters are exposed rather than hidden, because the useful values are data-dependent:
-`--registration-level`, `--focus-radius`, `--guide-radius`, `--guide-epsilon`,
-`--guide-space`, `--pyramid-floor`, `--fusion`, `--salience-radius`.
+Parameters are exposed rather than hidden, because the useful values are data-dependent.
+**[`docs/PARAMETERS.md`](docs/PARAMETERS.md) describes each one** — what it does, which
+stage it belongs to, and what moving it costs, with the measured effects where they were
+measured.
 
 ## Input assumptions
 
