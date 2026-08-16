@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The macOS release bundle's metadata. `@VERSION@` is substituted by
+  `.github/workflows/release.yml` from the workspace version.
+
+  CFBundleName is the load-bearing key: it is what AppKit draws in the menu bar beside
+  the Apple logo. Without a bundle it draws the process name instead — `stackaroni-app` —
+  which is why `crates/app/src/main.rs` carries a workaround for the un-bundled case.
+
+  Deliberately no CFBundleIconFile: there is no icon yet, and naming one that does not
+  exist gets a generic icon plus a console warning rather than the generic icon alone.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Stackaroni</string>
+	<key>CFBundleDisplayName</key>
+	<string>Stackaroni</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.nschroeter.stackaroni</string>
+	<key>CFBundleExecutable</key>
+	<string>stackaroni-app</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<!-- Matches the runner the release is built on; see the matrix in release.yml. -->
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Niels Schröter. MIT licence.</string>
+</dict>
+</plist>

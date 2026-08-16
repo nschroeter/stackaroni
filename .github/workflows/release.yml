@@ -1,0 +1,222 @@
+name: Release
+
+# Builds all three platforms and opens a DRAFT GitHub release with the archives
+# attached. Nothing is published without a human pressing the button in the UI.
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# `workflow_dispatch` runs the same builds and uploads the archives as workflow
+# artifacts without touching releases, which is how to rehearse this without
+# spending a tag. See the `publish` job's `if:`.
+#
+# Deliberately separate from ci.yml. That file's `build` job answers "does it still
+# compile on the other two platforms", runs manually, and is not allowed to write
+# anything. This one produces artifacts people download, so it pins its runners and
+# refuses to run against a tag that disagrees with Cargo.toml.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Read-only by default. Only `publish` gets `contents: write`, and only it needs to.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The one thing worth failing fast on: a tag that does not match the workspace
+  # version would produce `stackaroni-1.0.0-*.tar.gz` files hanging off a `v1.1.0`
+  # release, and the mismatch would only surface in a bug report months later.
+  #
+  # Same reasoning as `crates/core/tests/parameters_doc.rs`: two copies of a value
+  # that happen to agree are indistinguishable from one source of truth until they
+  # do not.
+  version:
+    name: version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: resolve
+        name: Resolve the workspace version and check it against the tag
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "stackaroni-app") | .version')
+          echo "workspace version: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME#v}"
+            if [ "$tag" != "$version" ]; then
+              echo "::error::tag ${GITHUB_REF_NAME} does not match workspace version ${version}"
+              exit 1
+            fi
+            echo "tag ${GITHUB_REF_NAME} matches"
+          fi
+
+  build:
+    name: ${{ matrix.name }}
+    needs: version
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One platform failing should not hide the state of the other two.
+      fail-fast: false
+      matrix:
+        include:
+          # Pinned, not `ubuntu-latest`. A release binary is linked against the
+          # runner's glibc and will not start on anything older, so which image
+          # builds it is part of what is shipped and should change deliberately.
+          # 24.04 is the current GA LTS; 26.04 exists but is still a beta image.
+          - name: linux-x86_64
+            runner: ubuntu-24.04
+          - name: windows-x86_64
+            runner: windows-2025
+          # Same pin and the same reason as ci.yml: `macos-latest` has moved across
+          # architectures before, and a silent flip would ship an x86_64 binary
+          # labelled Apple Silicon. Intel Macs are not built for — see the README.
+          - name: macos-aarch64
+            runner: macos-15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Identical list to ci.yml's. eframe pulls in winit and the glow renderer,
+      # which need X11/Wayland and GL headers at build time; `rfd` 0.17 needs
+      # nothing added because it defaults to the XDG portal backend, not GTK.
+      - name: Install Linux windowing dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxrandr-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libgl1-mesa-dev
+
+      # Both binaries: the CLI is how the pipeline is run headlessly and how debug
+      # output is produced, and a GUI-only download would leave that unavailable to
+      # anyone not building from source.
+      - name: Build
+        run: cargo build --release -p stackaroni-app -p stackaroni-cli
+
+      - name: Confirm the macOS binary is Apple Silicon
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          archs=$(lipo -archs target/release/stackaroni-app)
+          echo "architectures: $archs"
+          case "$archs" in
+            *arm64*) echo "arm64 confirmed" ;;
+            *) echo "::error::expected an arm64 binary, got '$archs'"; exit 1 ;;
+          esac
+
+      # The GUI ships as a bundle, not a loose binary: `CFBundleName` is what puts
+      # "Stackaroni" in the menu bar, and a double-clickable app is what a macOS user
+      # expects to be handed. `packaging/macos/Info.plist` carries the detail.
+      - name: Assemble the macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="dist/Stackaroni.app"
+          mkdir -p "$app/Contents/MacOS"
+          cp target/release/stackaroni-app "$app/Contents/MacOS/stackaroni-app"
+          sed "s/@VERSION@/${{ needs.version.outputs.version }}/g" \
+            packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          # Fails the build rather than shipping a bundle macOS will refuse to open.
+          plutil -lint "$app/Contents/Info.plist"
+
+      - name: Stage the archive contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp README.md LICENSE docs/PARAMETERS.md dist/
+          case "${{ runner.os }}" in
+            macOS)   cp target/release/stackaroni-cli dist/ ;;
+            Linux)   cp target/release/stackaroni-app target/release/stackaroni-cli dist/ ;;
+            Windows) cp target/release/stackaroni-app.exe target/release/stackaroni-cli.exe dist/ ;;
+          esac
+          ls -l dist
+
+      # tar on the Unixes to keep the executable bit and the bundle's directory
+      # structure; zip on Windows because that is what Explorer opens natively.
+      - name: Archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="stackaroni-${{ needs.version.outputs.version }}-${{ matrix.name }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "${name}.zip" ./dist/*
+          else
+            # COPYFILE_DISABLE keeps macOS from writing an AppleDouble `._` sidecar
+            # next to every file in the bundle. Harmless on Linux, where it is unset
+            # anyway.
+            COPYFILE_DISABLE=1 tar -czf "${name}.tar.gz" -C dist .
+          fi
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: stackaroni-${{ matrix.name }}
+          path: |
+            *.tar.gz
+            *.zip
+          if-no-files-found: error
+
+  publish:
+    name: draft release
+    needs: [version, build]
+    # Tags only. A `workflow_dispatch` run stops after `build`, leaving the archives
+    # as workflow artifacts — a rehearsal that cannot create a release by accident.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Named by extension rather than `./*`: the redirection creates SHA256SUMS
+      # before `sha256sum` runs, and a glob that picked it up would checksum an
+      # empty file and list it in itself.
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./*.tar.gz ./*.zip > SHA256SUMS
+          cat SHA256SUMS
+
+      # Draft, so the notes can be read and edited before anyone can download this.
+      # `--generate-notes` is left off deliberately: the draft's own UI has a
+      # "Generate release notes" button, and combining it with a notes file is one
+      # more thing that would only be found broken during a release.
+      - name: Open the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          sed "s/@VERSION@/${VERSION}/g" .github/release-notes.md > notes.md
+          gh release create "${GITHUB_REF_NAME}" \
+            --draft \
+            --title "Stackaroni ${VERSION}" \
+            --notes-file notes.md \
+            dist/*

@@ -95,6 +95,31 @@ const PANEL_MARGIN: i8 = 12;
 #[cfg(target_os = "macos")]
 const APP_MENU_TITLE: &str = "Stackaroni";
 
+/// Whether this process was launched from inside an `.app` bundle.
+///
+/// Structural rather than a `CFBundleName` lookup: for a loose binary AppKit reports the
+/// *enclosing directory* as the main bundle, so asking Foundation whether there is a
+/// bundle answers yes either way. `…/Stackaroni.app/Contents/MacOS/stackaroni-app` is the
+/// layout that actually distinguishes the two.
+#[cfg(target_os = "macos")]
+fn in_app_bundle() -> bool {
+    fn bundled(exe: &Path) -> Option<bool> {
+        let macos = exe.parent()?;
+        let contents = macos.parent()?;
+        let app = contents.parent()?;
+        Some(
+            macos.file_name()? == "MacOS"
+                && contents.file_name()? == "Contents"
+                && app.extension()? == "app",
+        )
+    }
+
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| bundled(&exe))
+        .unwrap_or(false)
+}
+
 /// The macOS menu bar, and the item ids needed to recognise its events.
 ///
 /// **Kept alive deliberately.** Dropping [`muda::Menu`] tears the menu down, so it is
@@ -111,6 +136,9 @@ struct NativeMenu {
     events: std::sync::mpsc::Receiver<muda::MenuEvent>,
     documentation: muda::MenuId,
     about: muda::MenuId,
+    /// Whether [`NativeMenu::retitle_app_menu`] still owes its one-off clear. Starts
+    /// *done* inside an `.app` bundle, where there is nothing to correct.
+    title_cleared: std::cell::Cell<bool>,
 }
 
 #[cfg(target_os = "macos")]
@@ -156,6 +184,7 @@ impl NativeMenu {
             documentation: documentation.id().clone(),
             about: about.id().clone(),
             events,
+            title_cleared: std::cell::Cell::new(in_app_bundle()),
             _menu: menu,
         })
     }
@@ -176,9 +205,10 @@ impl NativeMenu {
     /// installs and would not have worked here: winit leaves that submenu's title empty,
     /// so eframe's `app_icon::set_title_and_icon_mac` is already setting a new value.
     ///
-    /// The real fix is shipping an `.app` bundle with a `CFBundleName`, at which point all
-    /// of this can go.
-    fn retitle_app_menu(&self, cleared: &mut bool) {
+    /// Inside an `.app` bundle none of that applies — AppKit has a `CFBundleName` to draw
+    /// and draws it — so [`Self::title_cleared`] starts `true` there and the clear is
+    /// skipped, leaving only the comparison. Releases are bundles; `cargo run` is not.
+    fn retitle_app_menu(&self) {
         use objc2::MainThreadMarker;
         use objc2_app_kit::NSApplication;
         use objc2_foundation::NSString;
@@ -193,9 +223,9 @@ impl NativeMenu {
             return;
         };
 
-        if !*cleared {
+        if !self.title_cleared.get() {
             app_menu.setTitle(&NSString::new());
-            *cleared = true;
+            self.title_cleared.set(true);
             return;
         }
 
@@ -541,9 +571,6 @@ struct App {
     /// The macOS menu bar. `None` off macOS, and if AppKit refused it.
     #[cfg(target_os = "macos")]
     native_menu: Option<NativeMenu>,
-    /// Whether [`NativeMenu::retitle_app_menu`] has done its one-off clear yet.
-    #[cfg(target_os = "macos")]
-    menu_title_cleared: bool,
 
     /// Where the last export landed, so the status bar can say so.
     exported: Option<std::path::PathBuf>,
@@ -1148,10 +1175,10 @@ impl App {
             // The retitle needs a second frame to set the name it cleared, and egui is
             // reactive: without this the app can idle after frame one and leave the menu
             // bar blank. One extra frame at startup, then never again.
-            if !self.menu_title_cleared {
+            if !menu.title_cleared.get() {
                 ctx.request_repaint();
             }
-            menu.retitle_app_menu(&mut self.menu_title_cleared);
+            menu.retitle_app_menu();
             let (documentation, about) = (menu.documentation.clone(), menu.about.clone());
             // Collected before acting on any of it: the handlers below take `&mut self`,
             // and `menu` is borrowed from it.
