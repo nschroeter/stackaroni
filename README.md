@@ -19,8 +19,22 @@ tip to the far markings](docs/images/screenshot-result.jpg)
 
 > **Status: it works and is in use, but it is one person's tool.** Output is judged by eye
 > against a fixed checklist on a fixed set of test stacks; the ratings and the reasoning
-> behind every change are in [`docs/eval-log.md`](docs/eval-log.md). There is no packaged
-> release yet — you build it from source.
+> behind every change are in [`docs/eval-log.md`](docs/eval-log.md).
+
+## Download
+
+[**Latest release**](https://github.com/nschroeter/stackaroni/releases/latest) — macOS
+(Apple Silicon), Linux x86-64, Windows x86-64. Each archive holds the GUI, the
+`stackaroni-cli` headless runner and the docs, and `SHA256SUMS` covers all three.
+
+**The builds are not code-signed**, so both systems object the first time. On macOS,
+right-click `Stackaroni.app` → **Open** → **Open** (or
+`xattr -d com.apple.quarantine Stackaroni.app`). On Windows, SmartScreen's **More info**
+→ **Run anyway**.
+
+Intel Macs and older Linux distributions are not covered — the macOS build is arm64 only
+and the Linux binary needs glibc 2.39 or newer (Ubuntu 24.04 and up). Build from source
+for those.
 
 ## What it does
 
@@ -39,7 +53,7 @@ registration  →  focus measurement  →  weight estimation  →  fusion
 Frames are streamed rather than loaded: a 100-frame 50 MP stack never sits in memory at
 once. A full run on that size takes about 4½ minutes.
 
-## Building
+## Building from source
 
 Needs a recent Rust toolchain — the workspace is on edition 2024.
 
