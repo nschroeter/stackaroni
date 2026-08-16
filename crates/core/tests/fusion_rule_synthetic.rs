@@ -96,7 +96,7 @@ fn selection_versus_blend_against_ground_truth() {
     println!("detail <1 means detail lost; bokeh >1 means mottling (checklist item 3)\n");
     println!("{:>10}  {:>8}  {:>8}", "rule", "detail", "bokeh");
 
-    // The radius sweep tests one mechanism for the antenna softness Niels scored down:
+    // The radius sweep tests one mechanism for the antenna softness Human User scored down:
     // the salience window is square and `r2` spans 5 px, wider than a 1-3 px antenna, so
     // at the finest level a neighbouring frame's broader defocused energy can win the
     // window even where the line is sharper at the exact pixel. If that is the cause,

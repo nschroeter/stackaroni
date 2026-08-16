@@ -83,7 +83,7 @@ the scan skips it. This is not hypothetical — a fixture sat at the top level b
 ## Third-party reference renders
 
 `<stack>/reference_pmax.tif` — the same source frames stacked by **Zerene Stacker**
-using its **PMax** method, supplied by Niels. Present for `blossom` and `ruler` as of
+using its **PMax** method, supplied by Human User. Present for `blossom` and `ruler` as of
 2026-08-09.
 
 **What it is for:** answering "is this achievable on this data at all?" and "where
@@ -119,6 +119,6 @@ error against it and treat the number as quality. That mistake is already logged
 `docs/eval-log.md` — ground-truth RMSE rewarded noise reduction over sharpness, and
 separately under-weighted background coherence, pointing the wrong way in opposite
 directions. This file is a qualitative reference for looking at, and for locating *where*
-to look. Ratings still come from Niels.
+to look. Ratings still come from Human User.
 
 Excluded from frame discovery via `NON_FRAME_STEMS`, alongside `stackaroni_fused`.
