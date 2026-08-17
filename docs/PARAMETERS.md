@@ -136,6 +136,28 @@ means fewer.
 
 ---
 
+## Memory limit
+
+Not a pipeline parameter — it changes nothing about the output — but it is the one thing
+that can stop a run before it starts, so it belongs here.
+
+Before a run, the frame headers are read and a peak-memory estimate is computed from frame
+size, strip layout, core count and pyramid depth. If it exceeds the limit, parallelism is
+lowered until it fits; the run simply takes longer, silently. Only when even one frame at a
+time exceeds the limit does anything appear: the app shows a dialog with **Run anyway**, and
+the CLI refuses unless given `--ignore-memory-limit`.
+
+The limit is `max(16 GB, 25% of physical RAM)`, capped at 90% of RAM so it cannot exceed the
+machine it is protecting. On a 36 GB or 64 GB machine that is 16 GB; on 128 GB it is 32 GB.
+
+**Strip layout dominates the estimate.** A frame written as one strip is fully resident
+while its rows are read — 300 MB at 50 MP against ~13 MB for the same pixels in 64-row
+strips — so re-exporting with strips is the cheapest fix when the warning appears.
+
+**The estimate is a model, not a measurement**, fitted to four measured runs and required to
+never under-predict them. It can be wrong, which is why the override exists rather than a
+refusal.
+
 ## Changing them
 
 Every parameter is exposed in both front ends because the useful values are

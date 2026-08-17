@@ -152,7 +152,7 @@ slow. Never check inside the final `write_rgb16_srgb` — a truncated TIFF that 
 real output is worse than finishing the write.
 
 **How wide those stages go is a memory decision, not a core count** (`crates/core/src/budget.rs`,
-T18). A strip is the TIFF decoder's atomic unit, so a frame written as a *single* strip — common
+T18-T19). A strip is the TIFF decoder's atomic unit, so a frame written as a *single* strip — common
 from exporters — is entirely resident while its rows are read: 300 MB against ~13 MB for the same
 pixels in 64-row strips. Registration holds two such readers per task, so 14 cores would start
 8.4 GB of frame cache. The three parallel stages therefore run inside a rayon pool sized to a
@@ -161,6 +161,17 @@ strip would re-decode 300 MB per row read, turning a memory problem into a far w
 On striped input the cap does not bind and scheduling is unchanged, which is what keeps every
 rating in `docs/eval-log.md` valid. Fusion is exempt: it is sequential and releases each frame's
 cache as it finishes with it, so it is O(one frame) regardless of stack depth.
+
+**T19 turned that into a predicted budget the user can see.** `budget::estimate` predicts peak
+memory from headers alone — frame size, strip layout, core count, pyramid depth — and `fit` picks
+the widest parallelism that stays under `max(16 GB, 25% of RAM)`, clamped to 90% of RAM. Two things
+about it are load-bearing. **It is a `max` over stages, never a sum**, because stages run in
+sequence and the measurements prove a summing model over-predicts by nearly 2x. And **it warns
+rather than refuses** — the CLI takes `--ignore-memory-limit`, the app offers "Run anyway" — because
+three of its constants are fitted to four measured runs rather than derived, so it can be wrong in
+either direction. The gate that keeps it honest is `the_estimate_brackets_every_measured_run`: never
+under-predict a measurement, never exceed one by more than 35%. Adding a stage, or changing what one
+allocates per thread, means re-fitting against that test rather than reasoning about it.
 
 `Error::Cancelled` is the one error variant that is not a fault. Callers should clean up
 scratch on it rather than keeping it for inspection, and treat the run as never having

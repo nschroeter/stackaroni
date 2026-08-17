@@ -16,6 +16,23 @@ Sections in a release, all optional except the first line: 🚀 Features, 🩹 F
 `crates/core/tests/changelog.rs` fails the build if the current version has no section
 here, for the same reason `parameters_doc.rs` exists.
 
+## [Unreleased]
+
+### 🚀 Features
+
+**Memory limit with an override.** Before a run starts, the frame headers are read and peak
+memory is predicted from frame size, strip layout, core count and pyramid depth. If the
+prediction exceeds the limit, parallelism drops until it fits — the run takes longer and
+says nothing. Only when even one frame at a time will not fit does anything appear: the app
+offers **Run anyway**, and the CLI refuses unless given `--ignore-memory-limit`.
+
+The limit is `max(16 GB, 25% of RAM)`, capped at 90% of RAM so it cannot exceed the machine
+it protects. Single-strip frames dominate the estimate — one is fully resident while its
+rows are read — so re-exporting with strips is the cheapest fix when the warning appears.
+
+**It is a warning, not a refusal, because the estimate is a model**, fitted to four measured
+runs and required never to under-predict them. It can be wrong, and you know your machine.
+
 ## [1.0.3] — 2026-08-16
 
 ### 🔬 Quality

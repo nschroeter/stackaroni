@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Parser, ValueEnum};
 use fs4::available_space;
+use stackaroni_core::budget;
 use stackaroni_core::debug;
 use stackaroni_core::defaults;
 use stackaroni_core::discovery::{
@@ -96,6 +97,13 @@ struct Cli {
     /// Report per-frame progress.
     #[arg(long, short)]
     verbose: bool,
+
+    /// Run even when the predicted peak memory exceeds the limit.
+    ///
+    /// The prediction is a model, not a measurement, so it can be wrong — this is the
+    /// escape hatch for when it is, or when swapping is an acceptable price.
+    #[arg(long)]
+    ignore_memory_limit: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -211,6 +219,32 @@ fn run(cli: &Cli, stack: &Stack, output: &Path) -> Result<()> {
             scratch_root.display(),
             available as f64 / 1e9
         );
+    }
+
+    // Memory, on the same principle as the scratch check above and immediately after it:
+    // the two ways a run can fail for reasons visible before it starts.
+    let workload = budget::Workload::probe(
+        &stack.frames[0],
+        frames,
+        info,
+        cli.guide_radius,
+        cli.registration_level,
+    )?;
+    let estimate = budget::fit(&workload);
+    if !estimate.fits() {
+        let message = format!(
+            "{} is predicted to need {:.1} GB, over the {:.1} GB limit, even one frame at a time.\n\
+             Re-exporting the frames with strips rather than one strip per file is the cheapest \
+             fix; --ignore-memory-limit runs it anyway.",
+            stack.name,
+            estimate.peak_bytes as f64 / 1e9,
+            estimate.limit_bytes as f64 / 1e9,
+        );
+        if cli.ignore_memory_limit {
+            eprintln!("warning: {message}");
+        } else {
+            bail!(message);
+        }
     }
 
     let scratch = scratch_root.join(format!("stackaroni-{}-{}", stack.name, std::process::id()));

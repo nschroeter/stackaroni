@@ -223,26 +223,28 @@ impl WeightEstimator for GuidedWeights {
         let done = AtomicUsize::new(0);
         // One frame per task: `guide` opens the frame, reads it once and drops it.
         let per_task = cache_bytes_max(&self.frames[0])?;
-        let mut indexed: Vec<(usize, ScratchPlane)> = budget::run_bounded(per_task, || {
-            (0..total)
-                .into_par_iter()
-                .map(|index| {
-                    if run.cancelled() {
-                        return Err(Error::Cancelled);
-                    }
-                    let guide = self.guide(index)?;
-                    let plane = self.refine(index, &labels, &guide)?;
-                    drop(guide);
-                    let _ = std::fs::remove_file(self.scratch.join(format!("guide{index}.f32")));
-                    run.progress(
-                        Stage::Weights,
-                        done.fetch_add(1, Ordering::Relaxed) + 1,
-                        total,
-                    );
-                    Ok((index, plane))
-                })
-                .collect::<Result<Vec<_>>>()
-        })?;
+        let mut indexed: Vec<(usize, ScratchPlane)> =
+            budget::run_bounded(budget::concurrency_for(per_task), || {
+                (0..total)
+                    .into_par_iter()
+                    .map(|index| {
+                        if run.cancelled() {
+                            return Err(Error::Cancelled);
+                        }
+                        let guide = self.guide(index)?;
+                        let plane = self.refine(index, &labels, &guide)?;
+                        drop(guide);
+                        let _ =
+                            std::fs::remove_file(self.scratch.join(format!("guide{index}.f32")));
+                        run.progress(
+                            Stage::Weights,
+                            done.fetch_add(1, Ordering::Relaxed) + 1,
+                            total,
+                        );
+                        Ok((index, plane))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })?;
 
         // Restored to frame order before normalising: `normalize` sums across planes, and
         // float addition is not associative, so a completion-order shuffle would perturb

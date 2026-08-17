@@ -605,6 +605,13 @@ struct App {
     /// Shared with worker threads so a superseded load can be abandoned mid-decode.
     generation: Arc<AtomicU64>,
     error: Option<String>,
+    /// A run held back because it is predicted to exceed the memory limit.
+    ///
+    /// Separate from [`Self::error`] because it is a question, not a report: it needs two
+    /// buttons, and the run it describes is still startable.
+    memory_warning: Option<stackaroni_core::budget::Estimate>,
+    /// Set for exactly one `start_run`, by the user answering that question.
+    memory_override: bool,
 }
 
 impl App {
@@ -682,6 +689,15 @@ impl App {
             fusion: self.params.fusion,
             pyramid_floor: self.params.pyramid_floor,
         };
+        // The memory question, before the run rather than fifteen minutes into it. Asked
+        // once per attempt: answering it sets `memory_override`, which this consumes.
+        if !std::mem::take(&mut self.memory_override)
+            && let Some(estimate) = run::memory_estimate(&frames, stack_info, &settings)
+            && !estimate.fits()
+        {
+            self.memory_warning = Some(estimate);
+            return;
+        }
         match Run::start(frames, stack_info, settings, ctx.clone(), self.run_sequence) {
             Ok(run) => {
                 self.error = None;
@@ -739,6 +755,53 @@ impl App {
         // Escape and a click outside dismiss it too, which `should_close` folds in.
         if response.inner || response.should_close() {
             self.error = None;
+        }
+    }
+
+    /// The memory question: what it will cost, what the limit is, and two ways out.
+    ///
+    /// Deliberately not phrased as a refusal. The prediction is a model fitted to four
+    /// measurements, so it can be wrong, and the user is the one who knows whether this
+    /// machine has the headroom today.
+    fn memory_modal(&mut self, ctx: &egui::Context) {
+        let Some(estimate) = self.memory_warning else {
+            return;
+        };
+        let response = egui::Modal::new(egui::Id::new("memory-warning"))
+            .frame(Self::modal_frame(ctx))
+            .show(ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading("This stack may not fit in memory");
+                ui.add_space(8.0);
+                ui.label(format!(
+                    "It is predicted to need about {:.1} GB, against a {:.1} GB limit, even reading one frame at a time.",
+                    estimate.peak_bytes as f64 / 1e9,
+                    estimate.limit_bytes as f64 / 1e9,
+                ));
+                ui.add_space(6.0);
+                ui.label(
+                    "Running it anyway may make this machine swap. Re-exporting the frames with strips, rather than one strip per file, is the cheapest fix.",
+                );
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let run = ui.button("Run anyway").clicked();
+                        let cancel = ui.button("Cancel").clicked();
+                        (run, cancel)
+                    })
+                    .inner
+                })
+                .inner
+            });
+
+        let (run, cancel) = response.inner;
+        // Escape and a click outside mean "no", the safe reading of a dismissed warning.
+        if cancel || response.should_close() {
+            self.memory_warning = None;
+        } else if run {
+            self.memory_warning = None;
+            self.memory_override = true;
+            self.start_run(ctx);
         }
     }
 
@@ -866,6 +929,7 @@ impl eframe::App for App {
         self.poll_export(ui.ctx());
         self.poll_native_menu(ui.ctx());
         self.error_modal(ui.ctx());
+        self.memory_modal(ui.ctx());
         self.about_modal(ui.ctx());
         // Collect whatever the decoder finished since the last pass, and keep painting
         // while it works so thumbnails appear as they land rather than all at the end.
@@ -2034,6 +2098,64 @@ mod tests {
         assert!(
             modal_text(None).is_empty(),
             "the modal must not draw without an error"
+        );
+    }
+
+    /// Text drawn by the memory-warning modal, given an estimate.
+    fn memory_modal_text(estimate: Option<stackaroni_core::budget::Estimate>) -> Vec<String> {
+        let mut app = App {
+            memory_warning: estimate,
+            ..App::default()
+        };
+
+        fn collect(shape: &egui::epaint::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => into.push(text.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        collect(s, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let ctx = egui::Context::default();
+        let mut found = Vec::new();
+        for _ in 0..2 {
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| app.memory_modal(ctx));
+            found.clear();
+            for clipped in &output.shapes {
+                collect(&clipped.shape, &mut found);
+            }
+            output.textures_delta.clear();
+        }
+        found
+    }
+
+    /// The warning has to offer both answers, and name both numbers.
+    ///
+    /// A warning with only a dismiss button is a refusal wearing a warning's clothes, and
+    /// the whole point of this one is that the prediction is a model that can be wrong.
+    #[test]
+    fn the_memory_warning_names_the_numbers_and_offers_both_answers() {
+        let drawn = memory_modal_text(Some(stackaroni_core::budget::Estimate {
+            peak_bytes: 21_500_000_000,
+            concurrency: 1,
+            limit_bytes: 16 << 30,
+            reduced: true,
+        }));
+        let has = |needle: &str| drawn.iter().any(|t| t.contains(needle));
+
+        assert!(has("21.5 GB"), "predicted peak missing: {drawn:?}");
+        assert!(has("17.2 GB"), "limit missing: {drawn:?}");
+        assert!(has("Run anyway"), "no override: {drawn:?}");
+        assert!(has("Cancel"), "no way out: {drawn:?}");
+
+        // Silent when the run fits, which is every run on a normal stack.
+        assert!(
+            memory_modal_text(None).is_empty(),
+            "the modal must not draw without a warning"
         );
     }
 

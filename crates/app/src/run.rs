@@ -42,6 +42,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use fs4::available_space;
+use stackaroni_core::budget;
 use stackaroni_core::defaults;
 use stackaroni_core::error::{Error, Result};
 use stackaroni_core::focus::{WindowedLaplacian, evaluate_stack};
@@ -214,6 +215,30 @@ pub struct Run {
     handle: Option<JoinHandle<()>>,
     receiver: Receiver<Outcome>,
     outcome: Option<Outcome>,
+}
+
+/// What this run is predicted to cost in memory, and the limit it is judged against.
+///
+/// **Reports rather than refuses, and that split is deliberate.** Unlike the scratch-space
+/// check inside [`Run::start`], which fails a run that provably cannot finish, this is a
+/// model: it can be wrong in either direction. So the decision belongs to the user, and
+/// this returns the numbers the dialog shows. `None` when the first frame cannot be
+/// probed, which is not worth blocking a run over — the pipeline will report that failure
+/// properly a moment later.
+pub fn memory_estimate(
+    frames: &[PathBuf],
+    info: FrameInfo,
+    settings: &Settings,
+) -> Option<budget::Estimate> {
+    let workload = budget::Workload::probe(
+        frames.first()?,
+        frames.len(),
+        info,
+        settings.guide_radius,
+        settings.registration_level,
+    )
+    .ok()?;
+    Some(budget::fit(&workload))
 }
 
 impl Run {

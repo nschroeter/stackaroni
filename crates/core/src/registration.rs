@@ -244,7 +244,7 @@ pub fn register_stack(
     // same time. On striped input this charges ~26 MB and the cap does not bind; on
     // single-strip input it is 600 MB, and 14 concurrent pairs would be 8.4 GB.
     let per_task = 2 * cache_bytes_max(&frames[0])?;
-    let steps: Vec<Transform> = budget::run_bounded(per_task, || {
+    let steps: Vec<Transform> = budget::run_bounded(budget::concurrency_for(per_task), || {
         (0..n)
             .into_par_iter()
             .filter(|&i| i != anchor)
