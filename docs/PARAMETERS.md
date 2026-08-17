@@ -154,9 +154,11 @@ machine it is protecting. On a 36 GB or 64 GB machine that is 16 GB; on 128 GB i
 while its rows are read — 300 MB at 50 MP against ~13 MB for the same pixels in 64-row
 strips — so re-exporting with strips is the cheapest fix when the warning appears.
 
-**The estimate is a model, not a measurement**, fitted to four measured runs and required to
-never under-predict them. It can be wrong, which is why the override exists rather than a
-refusal.
+**The estimate is a model, not a measurement**, fitted to measured runs and required never to
+under-predict any of them. It carries 15% headroom on top, because peak memory drifts with the
+machine's own state: the same binary on the same 33 frames measured 10.1 GB one day and 11.3 GB
+the next, with no code change in between. It can still be wrong, which is why the override
+exists rather than a refusal.
 
 ## Changing them
 

@@ -75,6 +75,23 @@ const WEIGHT_BAND_BUFFERS: u64 = 44;
 /// and complex planes per pair, and `rustfft` allocates scratch of its own.
 const REGISTRATION_GRID_BUFFERS: u64 = 39;
 
+/// Headroom over the modelled peak, for day-to-day drift in the machine itself.
+///
+/// **Measured, and larger than it looks like it should be.** The *same binary* on the
+/// *same 33 single-strip frames* measured 10.096 GB one day and 11.094-11.329 GB the next.
+/// Nothing in the code changed between them. Peak footprint counts dirty mmapped scratch
+/// pages, and how many are still resident when a stage peaks depends on how aggressively
+/// the OS is writing back — which depends on the machine's overall memory pressure at the
+/// time. That state is an input to every measurement here and cannot be controlled for.
+///
+/// Striped input barely drifts (6.255 -> 6.220..6.323 GB), because its peak is the weights
+/// stage's steady per-thread buffers. Single-strip drifts because its peak is registration's
+/// in-flight readers, whose overlap varies.
+///
+/// Without this margin the fitted model under-predicted the next day's measurement of the
+/// very run it was fitted to, breaking the one property the estimate is supposed to have.
+const DRIFT_MARGIN: f64 = 1.15;
+
 /// Scratch-plane pages still dirty per frame when a stage peaks.
 ///
 /// Focus maps and weight planes are mmapped files, so most of their pages are written back
@@ -196,7 +213,8 @@ pub fn estimate(workload: &Workload, concurrency: usize, threads: usize) -> u64 
     // Sequential, one frame at a time, so depth does not enter.
     let fusion = FUSION_PLANES * 3 * workload.plane_bytes() + cache;
 
-    scratch + registration.max(focus).max(weights).max(fusion)
+    let modelled = scratch + registration.max(focus).max(weights).max(fusion);
+    (modelled as f64 * DRIFT_MARGIN) as u64
 }
 
 /// The largest parallelism whose prediction fits the limit, and that prediction.
@@ -291,38 +309,53 @@ mod tests {
         }
     }
 
-    /// **The four measurements this model was fitted to** (CLI, macOS, 14 threads,
-    /// `/usr/bin/time -l` peak footprint, 2026-08-16). They are why the estimator is a
-    /// `max` over stages rather than a sum, and why the fitted constants have the values
-    /// they do.
+    /// **Every measurement this model is held to** (CLI, macOS, 14 threads,
+    /// `/usr/bin/time -l` peak footprint). They are why the estimator is a `max` over
+    /// stages rather than a sum, why the fitted constants have the values they do, and —
+    /// after the second day's numbers arrived — why [`DRIFT_MARGIN`] exists.
     ///
-    /// The estimate must never come in *under* a measurement — a warning that cannot fire
-    /// when memory is genuinely short is worse than no warning — and must not exceed it by
-    /// more than 35%, or it warns on runs that would have been fine and gets ignored.
+    /// **Several runs of the same configuration are listed deliberately.** The same binary
+    /// on the same frames spans 10.096..11.329 GB across two days, and a model fitted to
+    /// one day's number under-predicted the next day's by 0.7 GB. Listing every run is what
+    /// stops that being invisible: the estimate must clear the *highest* of them, and stay
+    /// within 35% of the *lowest*, so both drift and over-warning are bounded.
+    ///
+    /// Never under-predicting is the property that matters — a warning that cannot fire
+    /// when memory is genuinely short is worse than no warning at all.
     #[test]
     fn the_estimate_brackets_every_measured_run() {
-        let measured: [(&str, u64, usize, f64); 4] = [
-            ("striped 8", STRIPED, 8, 5.880e9),
-            ("striped 33", STRIPED, 33, 6.255e9),
-            ("single-strip 8", SINGLE_STRIP, 8, 5.716e9),
-            ("single-strip 33", SINGLE_STRIP, 33, 10.096e9),
+        // (name, cache bytes, frames, every peak measured for that configuration)
+        let measured: [(&str, u64, usize, &[f64]); 4] = [
+            ("striped 8", STRIPED, 8, &[5.880e9]),
+            ("striped 33", STRIPED, 33, &[6.255e9, 6.323e9, 6.220e9]),
+            ("single-strip 8", SINGLE_STRIP, 8, &[5.716e9]),
+            (
+                "single-strip 33",
+                SINGLE_STRIP,
+                33,
+                &[10.096e9, 10.958e9, 10.953e9, 11.094e9, 11.329e9],
+            ),
         ];
-        for (name, cache, frames, actual) in measured {
+        for (name, cache, frames, runs) in measured {
             let workload = blossom(cache, frames);
             // Concurrency is bounded by the work available: 8 frames is 7 pairs.
             let concurrency = (frames - 1).min(14);
             let predicted = estimate(&workload, concurrency, 14) as f64;
-            assert!(
-                predicted >= actual,
-                "{name}: predicted {:.3} GB is under the measured {:.3} GB",
-                predicted / 1e9,
-                actual / 1e9
+            let (lowest, highest) = (
+                runs.iter().cloned().fold(f64::INFINITY, f64::min),
+                runs.iter().cloned().fold(0.0, f64::max),
             );
             assert!(
-                predicted <= actual * 1.35,
-                "{name}: predicted {:.3} GB exceeds the measured {:.3} GB by over 35%",
+                predicted >= highest,
+                "{name}: predicted {:.3} GB is under the highest measured {:.3} GB",
                 predicted / 1e9,
-                actual / 1e9
+                highest / 1e9
+            );
+            assert!(
+                predicted <= lowest * 1.35,
+                "{name}: predicted {:.3} GB exceeds the lowest measured {:.3} GB by over 35%",
+                predicted / 1e9,
+                lowest / 1e9
             );
         }
     }

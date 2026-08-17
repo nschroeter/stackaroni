@@ -169,9 +169,19 @@ about it are load-bearing. **It is a `max` over stages, never a sum**, because s
 sequence and the measurements prove a summing model over-predicts by nearly 2x. And **it warns
 rather than refuses** — the CLI takes `--ignore-memory-limit`, the app offers "Run anyway" — because
 three of its constants are fitted to four measured runs rather than derived, so it can be wrong in
-either direction. The gate that keeps it honest is `the_estimate_brackets_every_measured_run`: never
-under-predict a measurement, never exceed one by more than 35%. Adding a stage, or changing what one
-allocates per thread, means re-fitting against that test rather than reasoning about it.
+either direction. The gate that keeps it honest is `the_estimate_brackets_every_measured_run`: clear the *highest*
+measurement of each configuration, stay within 35% of the *lowest*. Adding a stage, or changing what
+one allocates per thread, means re-fitting against that test rather than reasoning about it.
+
+**Peak memory is not repeatable to better than ~10%, and the test lists several runs per
+configuration because of it.** The same binary on the same 33 single-strip frames measured
+10.096 GB one day and 11.329 GB the next. Peak footprint counts dirty mmapped scratch pages, and
+how many are resident when a stage peaks depends on the machine's memory pressure at the time — an
+input to every measurement here that cannot be controlled for. A model fitted to one day's number
+under-predicted the next day's by 0.7 GB, which is why `DRIFT_MARGIN` exists. **Never compare a
+memory measurement against one taken on another day and conclude anything from a difference under
+about a gigabyte** — that mistake produced a "the app costs 0.68 GB more than the CLI" finding that
+did not survive re-measurement.
 
 `Error::Cancelled` is the one error variant that is not a fault. Callers should clean up
 scratch on it rather than keeping it for inspection, and treat the run as never having
