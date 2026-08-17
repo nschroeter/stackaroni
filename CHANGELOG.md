@@ -16,6 +16,24 @@ Sections in a release, all optional except the first line: 🚀 Features, 🩹 F
 `crates/core/tests/changelog.rs` fails the build if the current version has no section
 here, for the same reason `parameters_doc.rs` exists.
 
+`## [Unreleased]` collects what has landed on `main` since the last release. The workflow's
+`awk` matches the version literally, so the heading is inert until it is renamed to the
+version being cut — which is the one step that must not be forgotten when raising the
+version in `Cargo.toml`.
+
+## [Unreleased]
+
+### 📖 Docs
+
+**Rejected experiments are kept as annotated tags, not branches** — the branch list stays
+readable, the code stays reachable via `git show <tag>`. One such tag exists:
+`t12-multiscale-focus`, the multi-scale focus measure built and measured inert in T12
+(`docs/algorithms.md` §4, `docs/eval-log.md`). Every other tag here is a `vX.Y.Z` release.
+
+**Memory limit** — `CHANGELOG.md` and `docs/PARAMETERS.md` now say where the 90%-of-RAM
+clamp on the limit actually binds: below ~18 GB of RAM, where the 16 GB floor would
+otherwise exceed the machine's own memory and no run could ever trip the warning.
+
 ## [1.1.1] — 2026-08-17
 
 ### 🩹 Fixes
