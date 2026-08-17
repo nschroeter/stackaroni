@@ -147,8 +147,10 @@ lowered until it fits; the run simply takes longer, silently. Only when even one
 time exceeds the limit does anything appear: the app shows a dialog with **Run anyway**, and
 the CLI refuses unless given `--ignore-memory-limit`.
 
-The limit is `max(16 GB, 25% of physical RAM)`, capped at 90% of RAM so it cannot exceed the
-machine it is protecting. On a 36 GB or 64 GB machine that is 16 GB; on 128 GB it is 32 GB.
+The limit is `max(16 GB, 25% of physical RAM)`, then clamped to 90% of RAM. On a 36 GB or
+64 GB machine that is 16 GB; on 128 GB it is 32 GB. The clamp only binds below ~18 GB of
+RAM, where the 16 GB floor would otherwise exceed the machine's own memory and no run could
+ever trip the warning — on an 8 GB machine the limit becomes 7.2 GB.
 
 **Strip layout dominates the estimate.** A frame written as one strip is fully resident
 while its rows are read — 300 MB at 50 MP against ~13 MB for the same pixels in 64-row

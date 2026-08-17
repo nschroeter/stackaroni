@@ -42,8 +42,10 @@ prediction exceeds the limit, parallelism drops until it fits — the run takes 
 says nothing. Only when even one frame at a time will not fit does anything appear: the app
 offers **Run anyway**, and the CLI refuses unless given `--ignore-memory-limit`.
 
-The limit is `max(16 GB, 25% of RAM)`, capped at 90% of RAM so it cannot exceed the machine
-it protects. Single-strip frames dominate the estimate — one is fully resident while its
+The limit is `max(16 GB, 25% of RAM)`, then clamped to 90% of RAM. The clamp only matters
+below ~18 GB of RAM, where the 16 GB floor would otherwise exceed the machine's own memory
+and no run could ever trip the warning — on an 8 GB machine the limit becomes 7.2 GB. Above
+that it never binds. Single-strip frames dominate the estimate — one is fully resident while its
 rows are read — so re-exporting with strips is the cheapest fix when the warning appears.
 
 **It is a warning, not a refusal, because the estimate is a model**, fitted to four measured
