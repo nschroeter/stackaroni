@@ -75,7 +75,7 @@ Rather than evaluating sharpness at only one spatial scale, a multi-scale method
 
 ### T12 — built, measured, and not shipped
 
-**This section is a dead end, recorded so it is not walked twice.** The paragraph above is the argument that motivated it, and the argument still sounds right; the measurements say it does essentially nothing on this pipeline as built. The code exists in full — metric, CLI flag, UI entry, sweep test — on the unmerged branch `t12-multiscale-focus`, and is deliberately not on `main`.
+**This section is a dead end, recorded so it is not walked twice.** The paragraph above is the argument that motivated it, and the argument still sounds right; the measurements say it does essentially nothing on this pipeline as built. The code exists in full — metric, CLI flag, UI entry, sweep test — at the unmerged tag `t12-multiscale-focus` (`git show t12-multiscale-focus`; it was a branch until the branch was deleted, the tag is what keeps the commit reachable), and is deliberately not on `main`.
 
 The literature does not supply one canonical multi-scale focus measure. What is established is the pyramid (Burt & Adelson, 1983), the measure applied at each level (Nayar & Nakagawa's modified Laplacian and its windowed sum, 1990/1994; surveyed by Pertuz, Puig & Garcia, 2013), and the practice of combining per-scale sharpness (Zhang et al.'s sum-of-Gaussian-based modified Laplacian, *Digital Signal Processing* 2020; Li et al.'s region mosaicking on Laplacian pyramids, *PLOS ONE* 13(5), 2018). What was implemented is the composition of those pieces:
 
@@ -93,7 +93,7 @@ F(x,y)   = F_0(x,y) + sum over k=1..S-1  d^k * expand^k(F_k)(x,y)
 
 **The suspected cause, not established.** Levels are summed **unnormalized**, and the 48× figure is direct evidence that they are not commensurable — the discrete Laplacian's response depends on grid spacing, so `F_k` computed on a half-size level is not on the same footing as `F_0`. Scale-space theory requires normalizing derivatives by the scale before combining them (Lindeberg, *IJCV* 30(2), 1998).
 
-**Trigger for revisiting: scale-normalized levels.** That is a *different algorithm*, not a parameter fix to this one, so it starts from this documented dead end on a new branch rather than by reviving `t12-multiscale-focus`. Two things to carry forward: the combination rule was weighted-sum only (max-across-scales was scoped out of v1 and never built), and the `S = 1` bit-identity requirement is what makes any such metric comparable to the shipped one on equal terms.
+**Trigger for revisiting: scale-normalized levels.** That is a *different algorithm*, not a parameter fix to this one, so it starts from this documented dead end on a new branch rather than by reviving the `t12-multiscale-focus` tag. Two things to carry forward: the combination rule was weighted-sum only (max-across-scales was scoped out of v1 and never built), and the `S = 1` bit-identity requirement is what makes any such metric comparable to the shipped one on equal terms.
 
 ## 5. Wavelet-domain stacking
 
