@@ -16,6 +16,22 @@ Sections in a release, all optional except the first line: 🚀 Features, 🩹 F
 `crates/core/tests/changelog.rs` fails the build if the current version has no section
 here, for the same reason `parameters_doc.rs` exists.
 
+## [1.1.1] — 2026-08-17
+
+### 🩹 Fixes
+
+**Memory warning could stay silent when it should not.** The peak-memory estimate shipped in
+1.1.0 was fitted to measurements taken on a single day, and peak memory is not repeatable to
+better than ~10% — the same binary on the same 33 frames measured 10.1 GB one day and 11.3 GB
+the next, with no code change in between. The estimate therefore under-predicted by about 7%,
+which is exactly the direction that matters: a warning that cannot fire when memory is short
+is worse than no warning.
+
+The estimate now carries 15% headroom, and its calibration is held against every measured
+run of each configuration rather than one apiece.
+
+No pipeline change: fused output is identical to 1.1.0.
+
 ## [1.1.0] — 2026-08-17
 
 ### 🚀 Features
