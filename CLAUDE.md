@@ -244,6 +244,12 @@ judge this the same way, by outcomes I can actually assess, not by aesthetic gue
   loader. Its other draw, `TableBuilder`, has no use in the current UI. The case for it will
   return if something ever needs to display encoded images or a real table; until then it
   would be weight for nothing.
+- **The menu bar is native where the OS has one, in-window where it does not** — `muda` builds
+  an `NSMenu` on macOS and an `HMENU` on Windows; Linux draws the same two items as an egui
+  menu in the toolbar. That is not an unfinished third platform: `muda`'s Linux backend is
+  gtk-only and eframe creates X11/Wayland surfaces directly, so there is no gtk window to
+  attach to, and Linux desktops expect an in-window menu anyway. The toolbar menu doubles as
+  the fallback when a native install fails, so it stays compiled off macOS.
 - Keep UI code in the `stackaroni-app` crate only; it depends on `stackaroni-core`, never the
   reverse. UI iteration
   should never risk touching pipeline logic.

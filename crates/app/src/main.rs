@@ -59,8 +59,8 @@ fn main() -> eframe::Result {
             ..Default::default()
         },
         Box::new(|cc| {
-            // Only the macOS menu bar needs it.
-            #[cfg(not(target_os = "macos"))]
+            // Only the native menu bars need it, and Linux has none.
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             let _ = cc;
             // Before the window is doing anything else. Stale scratch from runs that
             // died or were killed is exactly what eats the headroom the free-space
@@ -69,10 +69,11 @@ fn main() -> eframe::Result {
             Ok(Box::new(App {
                 reaped: (reaped.entries > 0).then_some(reaped),
                 // Here rather than earlier in `main`: AppKit requires the menu to be
-                // installed on the main thread with the app already initialised, and this
-                // closure is the first point where both hold.
-                #[cfg(target_os = "macos")]
-                native_menu: NativeMenu::install(&cc.egui_ctx),
+                // installed on the main thread with the app already initialised, and
+                // Windows needs a window to attach it to. This closure is the first point
+                // where all of that holds.
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                native_menu: NativeMenu::install(cc),
                 ..App::default()
             }))
         }),
@@ -148,16 +149,22 @@ fn in_app_bundle() -> bool {
         .unwrap_or(false)
 }
 
-/// The macOS menu bar, and the item ids needed to recognise its events.
+/// The OS menu bar, and the item ids needed to recognise its events.
 ///
 /// **Kept alive deliberately.** Dropping [`muda::Menu`] tears the menu down, so it is
 /// held for the process's lifetime rather than built and forgotten in `main`.
 ///
-/// egui cannot do this: the bar beside the Apple logo is AppKit's `NSMenu`, and
+/// egui cannot do either of these. On macOS the bar beside the Apple logo is AppKit's
+/// `NSMenu`; on Windows it is an `HMENU` owned by the window, which `muda` attaches with
+/// `SetMenu` and reads back by subclassing the window procedure. Linux has no third case —
+/// `muda`'s backend there is gtk-only and eframe creates X11/Wayland surfaces directly, so
+/// there is no gtk window to attach to and the toolbar's egui menu is the answer.
+///
+/// **The application submenu is macOS-only, and not an oversight on Windows.**
 /// `init_for_nsapp` replaces the whole main menu — including the default one winit
-/// installs. That is why the application submenu is rebuilt here with Hide and Quit; a
-/// bar carrying only Help would silently cost the standard shortcuts.
-#[cfg(target_os = "macos")]
+/// installs — so a bar carrying only Help would silently cost Hide and Quit. Windows keeps
+/// its system menu and close button whatever this does, so Help is the whole bar there.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 struct NativeMenu {
     _menu: muda::Menu,
     /// Clicks, forwarded off `muda`'s global channel — see [`NativeMenu::install`].
@@ -166,10 +173,11 @@ struct NativeMenu {
     about: muda::MenuId,
     /// Whether [`NativeMenu::retitle_app_menu`] still owes its one-off clear. Starts
     /// *done* inside an `.app` bundle, where there is nothing to correct.
+    #[cfg(target_os = "macos")]
     title_cleared: std::cell::Cell<bool>,
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl NativeMenu {
     /// Build the bar and install it, routing clicks so they wake the UI.
     ///
@@ -178,12 +186,13 @@ impl NativeMenu {
     /// only when some unrelated repaint came along, about half a second later. An event
     /// handler replaces that channel rather than adding to it (`MenuEvent::send` picks one
     /// or the other), so this forwards to a channel of its own and repaints on the way
-    /// past. The `Context` is why this takes `cc` rather than being callable from `main`.
-    fn install(ctx: &egui::Context) -> Option<Self> {
-        use muda::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+    /// past. That, and the window handle Windows installs onto, are why this takes `cc`
+    /// rather than being callable from `main`.
+    fn install(cc: &eframe::CreationContext<'_>) -> Option<Self> {
+        use muda::{Menu, MenuItem, Submenu};
 
         let (tx, events) = std::sync::mpsc::channel();
-        let ctx = ctx.clone();
+        let ctx = cc.egui_ctx.clone();
         muda::MenuEvent::set_event_handler(Some(move |event| {
             let _ = tx.send(event);
             ctx.request_repaint();
@@ -191,27 +200,50 @@ impl NativeMenu {
 
         let documentation = MenuItem::new("Parameter Documentation", true, None);
         let about = MenuItem::new("About Stackaroni", true, None);
-
-        let app = Submenu::with_items(
-            APP_MENU_TITLE,
-            true,
-            &[
-                &PredefinedMenuItem::hide(None),
-                &PredefinedMenuItem::hide_others(None),
-                &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::quit(None),
-            ],
-        )
-        .ok()?;
         let help = Submenu::with_items("Help", true, &[&documentation, &about]).ok()?;
 
-        let menu = Menu::with_items(&[&app, &help]).ok()?;
-        menu.init_for_nsapp();
+        #[cfg(target_os = "macos")]
+        let menu = {
+            use muda::PredefinedMenuItem;
+
+            let app = Submenu::with_items(
+                APP_MENU_TITLE,
+                true,
+                &[
+                    &PredefinedMenuItem::hide(None),
+                    &PredefinedMenuItem::hide_others(None),
+                    &PredefinedMenuItem::separator(),
+                    &PredefinedMenuItem::quit(None),
+                ],
+            )
+            .ok()?;
+            let menu = Menu::with_items(&[&app, &help]).ok()?;
+            menu.init_for_nsapp();
+            menu
+        };
+
+        #[cfg(target_os = "windows")]
+        let menu = {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+            let RawWindowHandle::Win32(window) = cc.window_handle().ok()?.as_raw() else {
+                // Every native Windows window is Win32; anything else means eframe is not
+                // running on a backend this can attach to, and the toolbar menu covers it.
+                return None;
+            };
+            let menu = Menu::with_items(&[&help]).ok()?;
+            // SAFETY: the handle comes from the window eframe just created and is borrowed
+            // for the duration of this call, which is the whole of `init_for_hwnd`'s
+            // requirement.
+            unsafe { menu.init_for_hwnd(window.hwnd.get()) }.ok()?;
+            menu
+        };
 
         Some(Self {
             documentation: documentation.id().clone(),
             about: about.id().clone(),
             events,
+            #[cfg(target_os = "macos")]
             title_cleared: std::cell::Cell::new(in_app_bundle()),
             _menu: menu,
         })
@@ -236,6 +268,7 @@ impl NativeMenu {
     /// Inside an `.app` bundle none of that applies — AppKit has a `CFBundleName` to draw
     /// and draws it — so [`Self::title_cleared`] starts `true` there and the clear is
     /// skipped, leaving only the comparison. Releases are bundles; `cargo run` is not.
+    #[cfg(target_os = "macos")]
     fn retitle_app_menu(&self) {
         use objc2::MainThreadMarker;
         use objc2_app_kit::NSApplication;
@@ -596,8 +629,10 @@ struct App {
     /// Whether the About dialog is up.
     about_open: bool,
 
-    /// The macOS menu bar. `None` off macOS, and if AppKit refused it.
-    #[cfg(target_os = "macos")]
+    /// The OS menu bar. Absent on Linux, and `None` where the OS refused it — which is
+    /// what `native_menu_installed` reads to decide whether the toolbar draws its own Help
+    /// menu instead.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     native_menu: Option<NativeMenu>,
 
     /// Where the last export landed, so the status bar can say so.
@@ -1230,73 +1265,85 @@ impl App {
                 }
             }
 
-            // Windows and Linux have no system menu bar, so the same two items live in
-            // the toolbar there. On macOS they are in the real menu bar and this would be
-            // a duplicate.
+            // Linux has no system menu bar, so the same two items live in the toolbar
+            // there. macOS and Windows normally draw them in the real one — this is their
+            // fallback for an install that failed, not a second copy: `cfg` cannot express
+            // "unless the OS took it", so the check is at runtime.
             #[cfg(not(target_os = "macos"))]
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("Help", |ui| {
-                    if ui.button("Parameter documentation…").clicked() {
-                        ui.ctx()
-                            .open_url(egui::OpenUrl::new_tab(PARAMETERS_DOC_URL));
-                        ui.close();
-                    }
-                    if ui.button("About").clicked() {
-                        self.about_open = true;
-                        ui.close();
-                    }
+            if !self.native_menu_installed() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button("Help", |ui| {
+                        if ui.button("Parameter documentation…").clicked() {
+                            ui.ctx()
+                                .open_url(egui::OpenUrl::new_tab(PARAMETERS_DOC_URL));
+                            ui.close();
+                        }
+                        if ui.button("About").clicked() {
+                            self.about_open = true;
+                            ui.close();
+                        }
+                    });
                 });
-            });
+            }
         });
         ui.add_space(4.0);
     }
 
-    /// Drain whatever the macOS menu bar reported since the last frame, and keep its
-    /// title from reverting.
+    /// Whether the OS is drawing the menu bar, and the toolbar should therefore not.
+    ///
+    /// Always false on Linux, where there is no native bar to install, and false on
+    /// Windows when the install failed — so the toolbar's Help menu is the fallback rather
+    /// than an alternative that has to be kept in sync.
+    ///
+    /// Not compiled on macOS: the toolbar's Help is `cfg`'d out there, so the only caller
+    /// is absent and the answer would always be "yes, and nothing asked".
+    #[cfg(not(target_os = "macos"))]
+    fn native_menu_installed(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.native_menu.is_some()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    }
+
+    /// Drain whatever the native menu bar reported since the last frame, and on macOS keep
+    /// its title from reverting.
     ///
     /// `muda` delivers on a channel rather than through egui's event queue, so it has to
-    /// be pumped explicitly. A no-op off macOS.
+    /// be pumped explicitly. A no-op on Linux.
     fn poll_native_menu(&mut self, ctx: &egui::Context) {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = ctx;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let Some(menu) = &self.native_menu else {
                 return;
             };
-            // The retitle needs a second frame to set the name it cleared, and egui is
-            // reactive: without this the app can idle after frame one and leave the menu
-            // bar blank. One extra frame at startup, then never again.
-            if !menu.title_cleared.get() {
-                ctx.request_repaint();
+            #[cfg(target_os = "macos")]
+            {
+                // The retitle needs a second frame to set the name it cleared, and egui is
+                // reactive: without this the app can idle after frame one and leave the
+                // menu bar blank. One extra frame at startup, then never again.
+                if !menu.title_cleared.get() {
+                    ctx.request_repaint();
+                }
+                menu.retitle_app_menu();
             }
-            menu.retitle_app_menu();
             let (documentation, about) = (menu.documentation.clone(), menu.about.clone());
             // Collected before acting on any of it: the handlers below take `&mut self`,
             // and `menu` is borrowed from it.
             let clicks: Vec<_> = menu.events.try_iter().collect();
             for event in clicks {
                 if event.id == documentation {
-                    self.open_parameter_documentation();
+                    ctx.open_url(egui::OpenUrl::new_tab(PARAMETERS_DOC_URL));
                 } else if event.id == about {
                     self.about_open = true;
                 }
             }
         }
-    }
-
-    /// The published parameter reference, in a browser.
-    ///
-    /// macOS only, because the native menu bar is the only caller: elsewhere the same item
-    /// lives in the toolbar, where `open_url` has a `Context` to work with. The `open`
-    /// command below is macOS-only too, so this is not a gate over portable code.
-    #[cfg(target_os = "macos")]
-    fn open_parameter_documentation(&self) {
-        // `webbrowser` via egui would need a `Context`; this path has none, and the OS
-        // opener is what `open_url` ends up calling anyway.
-        let _ = std::process::Command::new("open")
-            .arg(PARAMETERS_DOC_URL)
-            .spawn();
     }
 
     /// The About dialog: what this is, whose it is, and what you may do with it.
@@ -2156,6 +2203,52 @@ mod tests {
         assert!(
             memory_modal_text(None).is_empty(),
             "the modal must not draw without a warning"
+        );
+    }
+
+    /// Where no OS menu bar was installed, the toolbar has to carry Help itself.
+    ///
+    /// This is the fallback the runtime check exists for, and the only half of the menu
+    /// work that can be tested from here: the win32 bar is drawn by the OS, so nothing in
+    /// this process can observe it. That half is covered by the Windows target compiling
+    /// and by running it — the toolbar's is covered here.
+    ///
+    /// Not compiled on macOS, where the toolbar's Help is `cfg`'d out entirely. It runs on
+    /// CI's Linux test job, where `native_menu_installed` is always false.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_toolbar_carries_help_when_the_os_has_no_menu_bar() {
+        let mut app = App::default();
+        assert!(
+            !app.native_menu_installed(),
+            "a default App has no native menu to draw"
+        );
+
+        fn collect(shape: &egui::epaint::Shape, into: &mut Vec<String>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => into.push(text.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        collect(s, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| app.toolbar(ui));
+        });
+        let mut drawn = Vec::new();
+        for clipped in &output.shapes {
+            collect(&clipped.shape, &mut drawn);
+        }
+        output.textures_delta.clear();
+
+        assert!(
+            drawn.iter().any(|t| t.contains("Help")),
+            "no Help menu in the toolbar: {drawn:?}"
         );
     }
 

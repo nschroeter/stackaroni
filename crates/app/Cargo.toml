@@ -22,6 +22,11 @@ libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+# The win32 menu bar. `muda` attaches an `HMENU` to the window and subclasses it to turn
+# `WM_COMMAND` into the same event channel macOS reports on; `raw-window-handle` is only
+# needed to name the `HWND` type `eframe` hands over. Both come in via `eframe` already.
+muda = "0.19.3"
+raw-window-handle = "0.6"
 
 # Compiles `packaging/icon/stackaroni.ico` into the executable, so Explorer draws it for
 # the .exe itself — see build.rs.
@@ -33,10 +38,12 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1.31"
 
-# `muda` builds the menu bar; the two `objc2` crates are only there to keep AppKit from
-# renaming the application menu back to the process name — see `retitle_app_menu`. Both
-# are already in the tree via `eframe`, which reaches for AppKit the same way and for the
-# same reason, so this adds versions rather than dependencies.
+# `muda` builds the menu bar on both platforms that have one: an `NSMenu` beside the Apple
+# logo, an `HMENU` under the titlebar. The `objc2` crates are macOS-only and are there
+# solely to keep AppKit from renaming the application menu back to the process name — see
+# `retitle_app_menu`. All of these are already in the tree via `eframe`, which reaches for
+# AppKit the same way and for the same reason, so this adds versions rather than
+# dependencies.
 [target.'cfg(target_os = "macos")'.dependencies]
 muda = "0.19.3"
 objc2 = "0.6"

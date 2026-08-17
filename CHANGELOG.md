@@ -23,6 +23,19 @@ version in `Cargo.toml`.
 
 ## [Unreleased]
 
+### 🚀 Features
+
+**Windows gets a real menu bar** — the same Help menu macOS has beside the Apple logo,
+drawn by the OS under the titlebar rather than as a button in the toolbar. `muda` was
+already in the tree for macOS and ships the win32 backend; it attaches an `HMENU` to the
+window eframe created and reports clicks on the channel the app already drains.
+
+**Linux keeps the in-window menu, deliberately.** `muda`'s Linux backend is gtk-only and
+eframe creates X11/Wayland surfaces directly, so there is no gtk window to attach to — and
+Linux desktops expect the menu drawn in-window anyway. The toolbar menu is also the
+fallback on Windows if the install fails, so no platform can end up with no way to reach
+About or the parameter reference.
+
 ### 📖 Docs
 
 **Rejected experiments are kept as annotated tags, not branches** — the branch list stays
