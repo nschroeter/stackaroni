@@ -21,6 +21,27 @@ here, for the same reason `parameters_doc.rs` exists.
 version being cut — which is the one step that must not be forgotten when raising the
 version in `Cargo.toml`.
 
+## [Unreleased]
+
+### 🩹 Fixes
+
+**Output TIFFs now carry an sRGB ICC profile.** They were written as sRGB and said nothing
+about it, so a viewer had to guess. Most guess sRGB and land on the right answer, but a
+colour-managed application assumes its own working space instead — which is how a correct
+file ends up displayed wrong, and it made the ratings this project runs on partly a
+property of the viewer.
+
+The profile is generated in code rather than shipped as a binary asset: an OS profile is
+not ours to redistribute, and a downloaded blob is not reviewable in a diff. It is a
+display-class matrix/TRC profile with the published sRGB primaries and white point, and a
+tone curve sampled from the same transfer function the decoder applies — so the file cannot
+describe a curve the pipeline does not use.
+
+**No pixel changes**, confirmed with `tiffcmp` on synthetic_50 and on a 100-frame blossom
+run. The regression gate now hashes decoded pixels rather than file bytes, because adding
+metadata moved a hash whose whole purpose is to catch pipeline changes; it separately
+asserts the profile is present.
+
 ## [1.2.0] — 2026-08-18
 
 ### 🚀 Features

@@ -14,7 +14,8 @@ use std::sync::OnceLock;
 
 use tiff::ColorType;
 use tiff::decoder::{Decoder, DecodingResult};
-use tiff::encoder::{TiffEncoder, colortype};
+use tiff::encoder::{TiffEncoder, TiffValue, colortype};
+use tiff::tags::{Tag, Type};
 
 use crate::error::{Error, Result};
 use crate::image::{FrameInfo, linear_to_srgb, srgb_to_linear};
@@ -25,6 +26,29 @@ const OUT_ROWS_PER_STRIP: u32 = 64;
 
 /// Roughly how many input rows the strip cache is allowed to hold.
 const CACHE_ROWS: u32 = 256;
+
+/// `InterColourProfile`, where TIFF carries an embedded ICC profile.
+const TAG_ICC_PROFILE: u16 = 34675;
+
+/// Bytes written with TIFF's `UNDEFINED` field type.
+///
+/// The crate's own `&[u8]` writes as `BYTE`, and while most readers take an ICC profile
+/// either way, the tag is specified as `UNDEFINED` and a strict reader is entitled to skip
+/// what it does not recognise.
+struct Undefined<'a>(&'a [u8]);
+
+impl TiffValue for Undefined<'_> {
+    const BYTE_LEN: u8 = 1;
+    const FIELD_TYPE: Type = Type::UNDEFINED;
+
+    fn count(&self) -> usize {
+        self.0.len()
+    }
+
+    fn data(&self) -> std::borrow::Cow<'_, [u8]> {
+        std::borrow::Cow::Borrowed(self.0)
+    }
+}
 
 /// Linear light for every 16-bit sample value, indexed by the sample itself.
 ///
@@ -299,6 +323,14 @@ pub fn write_rgb16_srgb(
         .new_image::<colortype::RGB16>(info.width, info.height)
         .map_err(encode)?;
     image.rows_per_strip(OUT_ROWS_PER_STRIP).map_err(encode)?;
+
+    // Samples are re-encoded to sRGB above, so say so in the file rather than leaving a
+    // reader to guess. Written before the image data because the tag has to reach the IFD.
+    let profile = crate::icc::srgb_profile();
+    image
+        .encoder()
+        .write_tag(Tag::Unknown(TAG_ICC_PROFILE), Undefined(&profile))
+        .map_err(encode)?;
 
     let row_len = info.row_len();
     let mut row = vec![0f32; row_len];

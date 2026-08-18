@@ -11,6 +11,7 @@ pub mod filter;
 pub mod focus;
 pub mod fusion;
 pub mod grid;
+pub mod icc;
 pub mod image;
 pub mod pipeline;
 pub mod registration;

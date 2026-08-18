@@ -41,7 +41,14 @@ const SALIENCE_RADIUS: u32 = 2;
 const PYRAMID_FLOOR: u32 = 32;
 const GUIDE_SPACE: GuideSpace = GuideSpace::Perceptual;
 
-/// Hash of the fused output for `synthetic_50` at the configuration above.
+/// Hash of the fused **pixels** for `synthetic_50` at the configuration above.
+///
+/// **The basis changed on 2026-08-18, and that is why the value below is not the one older
+/// rows in `docs/eval-log.md` quote.** It hashed the whole file until output began carrying
+/// an sRGB ICC profile: a metadata addition that changed the file and not one pixel, which
+/// tripped a gate whose entire purpose is to catch pipeline changes. `tiffcmp` confirmed
+/// image data identical across that change before this constant moved, so the two values
+/// describe the same picture. `0xee22e1aa7efbdf2f` was the last file-bytes hash.
 ///
 /// Established on 2026-08-10 from the build at `0a94bd7`, before any optimisation work.
 /// Moved once, on 2026-08-14 for T15, after — and only after — Human User rated blossom and
@@ -62,7 +69,7 @@ const GUIDE_SPACE: GuideSpace = GuideSpace::Perceptual;
 /// frame, and the sharp data does not exist at valid coordinates. It is accepted because
 /// blossom and ruler — the real stacks, the ones the rubric is for — rate 5/5 under both
 /// methods. Do not let this constant's move be read as "the output got better everywhere".
-const EXPECTED: u64 = 0xee22_e1aa_7efb_df2f;
+const EXPECTED: u64 = 0xc380_280b_4ed2_051b;
 
 /// Is the pinned configuration still the one that ships?
 ///
@@ -123,6 +130,17 @@ fn hash(bytes: &[u8]) -> u64 {
     h
 }
 
+/// The embedded ICC profile, read back out of the written file.
+fn icc_profile(path: &Path) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut decoder = tiff::decoder::Decoder::new(std::io::BufReader::new(file)).ok()?;
+    decoder
+        .get_tag(tiff::tags::Tag::Unknown(34675))
+        .ok()?
+        .into_u8_vec()
+        .ok()
+}
+
 #[test]
 #[ignore = "requires test-data/synthetic_50, run with --release"]
 fn the_fused_output_is_byte_identical() {
@@ -169,11 +187,36 @@ fn the_fused_output_is_byte_identical() {
         .unwrap();
 
     let elapsed = started.elapsed();
-    let bytes = std::fs::read(&output).unwrap();
-    let got = hash(&bytes);
+
+    // **Pixels, not file bytes, and the distinction was bought with a real mistake waiting
+    // to happen.** This hashed the whole file until embedding an sRGB profile moved the
+    // hash without touching a single pixel — a metadata edit tripping the gate that exists
+    // to catch algorithm changes, whose header says never to just update the constant.
+    // Decoding first means the constant answers exactly one question: did the pipeline
+    // compute something different?
+    let decoded = Image::open(&output).unwrap();
+    let info = decoded.info();
+    let mut samples = vec![0f32; info.row_len() * info.height as usize];
+    decoded.read_rows(0, info.height, &mut samples).unwrap();
+    let got = hash(bytemuck::cast_slice(&samples));
+
+    // What the file says about itself is worth asserting too, just not in the same number.
+    // A missing profile is a real defect — a colour-managed viewer would fall back to a
+    // guess — and it is invisible to a hash over decoded samples.
+    let raw = std::fs::read(&output).unwrap();
+    let profile = icc_profile(&output).expect("the output carries no ICC profile");
+    assert!(
+        profile.len() > 128 && &profile[36..40] == b"acsp",
+        "not an ICC profile"
+    );
 
     println!("\n=== synthetic_50, full pipeline ===");
-    println!("{:.1?}  {} bytes  hash {got:#018x}", elapsed, bytes.len());
+    println!(
+        "{:.1?}  {} bytes on disk  {} samples  hash {got:#018x}",
+        elapsed,
+        raw.len(),
+        samples.len()
+    );
 
     if EXPECTED == 0 {
         println!("\nNo baseline recorded yet. Set EXPECTED to the hash above.\n");
