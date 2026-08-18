@@ -211,9 +211,14 @@ fn expand_phase(dst: &mut [f32], even: bool, i: i64, tap: impl Fn(i64, usize) ->
 }
 
 /// Successive reductions, finest first.
-pub fn gaussian_pyramid(base: &Bitmap, levels: usize) -> Vec<Bitmap> {
+///
+/// Takes the base by value: it becomes level 0, so a caller that still needs it must
+/// clone deliberately. It used to clone unconditionally, and every caller in the pipeline
+/// dropped its copy immediately afterwards — 600 MB of memcpy per frame at 50 MP, spent
+/// so that the one caller who might have cared could avoid a clone it never wanted.
+pub fn gaussian_pyramid(base: Bitmap, levels: usize) -> Vec<Bitmap> {
     let mut pyramid = Vec::with_capacity(levels);
-    pyramid.push(base.clone());
+    pyramid.push(base);
     for i in 1..levels {
         pyramid.push(reduce(&pyramid[i - 1]));
     }
@@ -222,18 +227,27 @@ pub fn gaussian_pyramid(base: &Bitmap, levels: usize) -> Vec<Bitmap> {
 
 /// Band-pass levels, with the coarsest Gaussian residual kept last so the pyramid
 /// reconstructs exactly.
-pub fn laplacian_pyramid(base: &Bitmap, levels: usize) -> Vec<Bitmap> {
-    let gaussian = gaussian_pyramid(base, levels);
+///
+/// Each Gaussian level is *moved* into the band it becomes, rather than copied and then
+/// dropped: a level is only ever read by the band below it, and by the time that band is
+/// built its own coarser neighbour has already been expanded. Walking finest to coarsest
+/// with one level of lookahead is what makes that ordering work — the reverse walk would
+/// need a level after it had been consumed.
+pub fn laplacian_pyramid(base: Bitmap, levels: usize) -> Vec<Bitmap> {
+    let mut gaussian = gaussian_pyramid(base, levels).into_iter().peekable();
     let mut pyramid = Vec::with_capacity(levels);
-    for i in 0..levels - 1 {
-        let up = expand(&gaussian[i + 1], gaussian[i].width, gaussian[i].height);
-        let mut band = gaussian[i].clone();
+    while let Some(mut band) = gaussian.next() {
+        // The coarsest level has nothing below it and stays a Gaussian residual.
+        let Some(coarser) = gaussian.peek() else {
+            pyramid.push(band);
+            break;
+        };
+        let up = expand(coarser, band.width, band.height);
         for (v, u) in band.data.iter_mut().zip(&up.data) {
             *v -= u;
         }
         pyramid.push(band);
     }
-    pyramid.push(gaussian[levels - 1].clone());
     pyramid
 }
 
@@ -411,7 +425,7 @@ impl ImageFusion for LaplacianPyramidFusion {
         // Accumulator, one band-pass level at a time; frames add into it in turn.
         let mut accumulator: Vec<Bitmap> = {
             let seed = Bitmap::new(info.width, info.height, 3);
-            gaussian_pyramid(&seed, levels)
+            gaussian_pyramid(seed, levels)
         };
         // Weight actually applied per level, so margin pixels — where some frames were
         // skipped and the weights no longer sum to one — can be rescaled afterwards.
@@ -441,14 +455,13 @@ impl ImageFusion for LaplacianPyramidFusion {
             // the whole loop, and on single-strip input one cached strip is one whole
             // frame. Releasing here keeps this stage at one frame regardless of count.
             image.release_cache();
-            let bands = laplacian_pyramid(&warped, levels);
-            drop(warped);
+            let bands = laplacian_pyramid(warped, levels);
 
             // The weight map is already in anchor coordinates, so it is not warped
             // again here. Smoothing it down the pyramid is what makes each frequency
             // band blend at its own scale rather than all of them at pixel scale.
             let weight_bitmap = plane_to_bitmap(weight)?;
-            let weight_levels = gaussian_pyramid(&weight_bitmap, levels);
+            let weight_levels = gaussian_pyramid(weight_bitmap, levels);
 
             let mut covered = Coverage::of(transform, info);
             for level in 0..levels {
@@ -536,7 +549,7 @@ impl ImageFusion for SelectionFusion {
 
         let mut result: Vec<Bitmap> = {
             let seed = Bitmap::new(info.width, info.height, 3);
-            gaussian_pyramid(&seed, levels)
+            gaussian_pyramid(seed, levels)
         };
         // Running best windowed salience per band-pass level. Negative so that the
         // first frame wins everywhere regardless of how flat it is.
@@ -568,8 +581,7 @@ impl ImageFusion for SelectionFusion {
             let warped = warp_frame(image, transform, info)?;
             // Read once, never revisited — see the same call in `LaplacianPyramidFusion`.
             image.release_cache();
-            let bands = laplacian_pyramid(&warped, levels);
-            drop(warped);
+            let bands = laplacian_pyramid(warped, levels);
 
             let mut covered = Coverage::of(transform, info);
             for level in 0..levels - 1 {
@@ -909,7 +921,7 @@ mod tests {
         // output carries the error whatever the weights say.
         let base = textured(64, 48, 3);
         let levels = level_count(64, 48, 8);
-        let back = reconstruct(&laplacian_pyramid(&base, levels));
+        let back = reconstruct(&laplacian_pyramid(base.clone(), levels));
 
         assert_eq!(back.data.len(), base.data.len());
         let worst = base
@@ -925,7 +937,7 @@ mod tests {
     fn odd_sizes_reconstruct_too() {
         let base = textured(37, 29, 3);
         let levels = level_count(37, 29, 8);
-        let back = reconstruct(&laplacian_pyramid(&base, levels));
+        let back = reconstruct(&laplacian_pyramid(base.clone(), levels));
         let worst = base
             .data
             .iter()
@@ -942,10 +954,10 @@ mod tests {
 
         let mut ones = Bitmap::new(32, 32, 1);
         ones.data.fill(1.0);
-        let weight_levels = gaussian_pyramid(&ones, levels);
-        let bands = laplacian_pyramid(&a, levels);
+        let weight_levels = gaussian_pyramid(ones, levels);
+        let bands = laplacian_pyramid(a.clone(), levels);
 
-        let mut acc = gaussian_pyramid(&Bitmap::new(32, 32, 3), levels);
+        let mut acc = gaussian_pyramid(Bitmap::new(32, 32, 3), levels);
         for level in 0..levels {
             for i in 0..weight_levels[level].data.len() {
                 for ch in 0..3 {
@@ -1124,13 +1136,13 @@ mod tests {
         }
         let levels = level_count(32, 32, 8);
 
-        let mut result = gaussian_pyramid(&Bitmap::new(32, 32, 3), levels);
+        let mut result = gaussian_pyramid(Bitmap::new(32, 32, 3), levels);
         let mut best: Vec<Vec<f32>> = result[..levels - 1]
             .iter()
             .map(|b| vec![-1.0f32; (b.width * b.height) as usize])
             .collect();
         for source in [&dim, &sharp] {
-            let bands = laplacian_pyramid(source, levels);
+            let bands = laplacian_pyramid(source.clone(), levels);
             for level in 0..levels - 1 {
                 let cover = full_cover(&bands[level]);
                 select_more_salient(

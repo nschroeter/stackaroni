@@ -41,7 +41,17 @@ change. Every column's running sum is still accumulated in the same order — fl
 is not associative, so a faster reduction over a different order would have changed the
 image.
 
-Peak memory is structurally unchanged: two planes are live at once, as before.
+**Peak memory fell with the time rather than paying for it.** Striped blossom peaks at
+**4.2-4.4 GB against 5.8-5.9 GB** before these three changes, measured alternating against
+a rebuilt older binary on the same machine. Stacks whose peak is registration rather than
+fusion — single-strip input — are unchanged, as expected.
+
+**fusion** — pyramid levels are moved rather than copied, taking fusion to **47 s** on the
+same stack. Building one Laplacian pyramid used to copy the full-resolution frame twice —
+once as the base of the Gaussian pyramid, once as the image each band is subtracted from —
+about 1.2 GB of memcpy per frame at 50 MP, both copies dropped moments later.
+`gaussian_pyramid` and `laplacian_pyramid` now take their input by value and hand each
+level into the band it becomes. Output byte-identical, same hash, same bytes.
 
 **fusion** — the weight plane is reduced straight from its mapped rows, taking fusion to
 **60 s** on the same stack. Selection fusion needs each frame's weights at the coarsest
