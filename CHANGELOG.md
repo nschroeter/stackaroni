@@ -43,6 +43,13 @@ image.
 
 Peak memory is structurally unchanged: two planes are live at once, as before.
 
+**fusion** — the weight plane is reduced straight from its mapped rows, taking fusion to
+**60 s** on the same stack. Selection fusion needs each frame's weights at the coarsest
+pyramid level only, and it was copying the full-resolution plane into an owned image
+first — an allocation and a 200 MB memcpy per frame that nothing else ever read. The
+pages still fault in, which is the part that is real work. Output byte-identical again,
+same hash, same bytes.
+
 ### 🚀 Features
 
 **Windows gets a real menu bar** — the same Help menu macOS has beside the Apple logo,

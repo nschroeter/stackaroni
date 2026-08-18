@@ -98,22 +98,34 @@ pub fn level_count(width: u32, height: u32, floor: u32) -> usize {
 /// floating-point expression, not a rearrangement of one. The byte-identical output gate
 /// is what holds that claim to account.
 pub fn reduce(src: &Bitmap) -> Bitmap {
-    let c = src.channels;
-    let (w, h) = (src.width as i64, src.height as i64);
-    let (out_w, out_h) = (src.width.div_ceil(2), src.height.div_ceil(2));
-    let (src_row, out_row) = (src.width as usize * c, out_w as usize * c);
+    reduce_data(&src.data, src.width, src.height, src.channels)
+}
+
+/// [`reduce`] over borrowed samples, so a source that is not a [`Bitmap`] does not have
+/// to become one first.
+///
+/// The weight planes are the case this exists for: they are mmapped scratch, and copying
+/// one into an owned `Bitmap` purely to reduce it cost an allocation and a 200 MB memcpy
+/// per frame at 50 MP — 28% of the fuse stage's wall time, second only to the `box_sum`
+/// that T20 parallelized. Reducing straight from the mapped rows skips both; the pages
+/// still fault in, which is the part that is real work.
+pub fn reduce_data(data: &[f32], width: u32, height: u32, channels: usize) -> Bitmap {
+    let c = channels;
+    let (w, h) = (width as i64, height as i64);
+    let (out_w, out_h) = (width.div_ceil(2), height.div_ceil(2));
+    let (src_row, out_row) = (width as usize * c, out_w as usize * c);
 
     // Rows are independent in both passes, and within a row the kernel taps are still
     // summed in ascending `k` order — the same additions in the same sequence, just
     // spread across cores. Float addition is not associative, so "same order" is doing
     // real work here, not being pedantic.
-    let mut horizontal = Bitmap::new(out_w, src.height, c);
+    let mut horizontal = Bitmap::new(out_w, height, c);
     horizontal
         .data
         .par_chunks_mut(out_row)
         .enumerate()
         .for_each(|(y, dst)| {
-            let row = &src.data[y * src_row..][..src_row];
+            let row = &data[y * src_row..][..src_row];
             for ox in 0..out_w as usize {
                 let x = 2 * ox as i64;
                 for (k, weight) in KERNEL.iter().enumerate() {
@@ -573,8 +585,22 @@ impl ImageFusion for SelectionFusion {
 
             // Base level: the weight map reduced all the way down, blended as before.
             // Only the coarsest level is needed, so the intermediate levels are not kept.
-            let mut w = plane_to_bitmap(weight)?;
-            for _ in 1..levels {
+            //
+            // The first reduction reads the mapped plane directly. Materializing it as a
+            // full-resolution `Bitmap` first was pure overhead — an allocation and a
+            // 200 MB copy per frame at 50 MP — since nothing but this chain ever reads it.
+            // A one-level pyramid has nothing to reduce, so it still needs the copy.
+            let mut w = if levels > 1 {
+                reduce_data(
+                    weight.rows(0, weight.height())?,
+                    weight.width(),
+                    weight.height(),
+                    1,
+                )
+            } else {
+                plane_to_bitmap(weight)?
+            };
+            for _ in 2..levels {
                 w = reduce(&w);
             }
             let (dst, src) = (&mut result[levels - 1], &bands[levels - 1]);
