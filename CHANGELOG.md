@@ -23,6 +23,18 @@ version in `Cargo.toml`.
 
 ## [Unreleased]
 
+### 🔬 Quality
+
+**The memory estimate is re-fitted to what the pipeline now costs.** Fusion stopped copying
+planes in 1.2.0, so striped stacks peak at 4.4-4.7 GB where the model still expected
+6.2-6.3 GB, and it over-predicted them by around 40%. That direction is the safe one — the
+estimate exists to warn before a run thrashes, and it never under-predicted — but a model
+that over-warns eventually gets ignored. All four calibration configurations were
+re-measured and the two fitted constants moved with them.
+
+Single-strip stacks are unchanged, as expected: their peak is registration holding decoded
+frames, which that work never touched.
+
 ### 🩹 Fixes
 
 **Output TIFFs now carry an sRGB ICC profile.** They were written as sRGB and said nothing

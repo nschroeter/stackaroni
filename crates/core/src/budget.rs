@@ -51,10 +51,14 @@ const LIMIT_CEILING: f64 = 0.90;
 
 /// Full-resolution RGB `f32` planes fusion holds at once.
 ///
-/// The warped frame, its Laplacian bands, the accumulator pyramid, the applied-weight
-/// planes and the reconstructed result. Independent of stack depth, because frames
-/// accumulate one at a time — see the memory note in [`crate::fusion`].
-const FUSION_PLANES: u64 = 5;
+/// The Laplacian bands, the accumulator pyramid and the reconstructed result. Independent
+/// of stack depth, because frames accumulate one at a time — see the memory note in
+/// [`crate::fusion`].
+///
+/// **Was 5 until T22.** The warped frame used to be cloned into the pyramid rather than
+/// moved into it, and each frame's weight plane was copied out of its mapping before being
+/// reduced; both copies are gone, and so are their planes.
+const FUSION_PLANES: u64 = 3;
 
 /// Banded working buffers the guided filter holds per thread.
 ///
@@ -67,7 +71,14 @@ const FUSION_PLANES: u64 = 5;
 /// in [`estimate`] a stage is not topped up by the others, so the striped measurements —
 /// where weights is the driver — pin this on its own. Fitting it as though stages summed
 /// gave 20 and under-predicted every striped run by nearly half.
-const WEIGHT_BAND_BUFFERS: u64 = 44;
+///
+/// **Re-fitted from 44 to 32 after T20-T22 (2026-08-18), and the reason is worth keeping.**
+/// Striped peak fell from 6.22-6.32 GB to 4.41-4.71 GB when fusion stopped making copies —
+/// which says fusion was contributing to the peak this constant was standing in for, and
+/// that a fitted stage multiplier absorbs whatever else is live at the time. It is
+/// calibration, not measurement of this stage in isolation, and a change anywhere in the
+/// pipeline can invalidate it.
+const WEIGHT_BAND_BUFFERS: u64 = 32;
 
 /// Grid-sized buffers registration holds per thread, at its working pyramid level.
 ///
@@ -325,15 +336,24 @@ mod tests {
     #[test]
     fn the_estimate_brackets_every_measured_run() {
         // (name, cache bytes, frames, every peak measured for that configuration)
+        // **The striped runs are all from 2026-08-18 or later, and that is deliberate.**
+        // Fusion stopped copying planes in T20-T22, so the earlier striped measurements
+        // (5.880 / 6.220-6.323 GB) describe code that no longer exists; holding the model
+        // to them would force it to predict memory the pipeline cannot use. The
+        // single-strip runs span both, because their peak is registration's in-flight
+        // readers — untouched by that work, and the wider spread is real drift worth
+        // keeping.
         let measured: [(&str, u64, usize, &[f64]); 4] = [
-            ("striped 8", STRIPED, 8, &[5.880e9]),
-            ("striped 33", STRIPED, 33, &[6.255e9, 6.323e9, 6.220e9]),
-            ("single-strip 8", SINGLE_STRIP, 8, &[5.716e9]),
+            ("striped 8", STRIPED, 8, &[4.409e9, 4.416e9]),
+            ("striped 33", STRIPED, 33, &[4.697e9, 4.706e9]),
+            ("single-strip 8", SINGLE_STRIP, 8, &[5.716e9, 5.783e9]),
             (
                 "single-strip 33",
                 SINGLE_STRIP,
                 33,
-                &[10.096e9, 10.958e9, 10.953e9, 11.094e9, 11.329e9],
+                &[
+                    10.096e9, 10.958e9, 10.953e9, 11.094e9, 11.329e9, 9.783e9, 10.682e9,
+                ],
             ),
         ];
         for (name, cache, frames, runs) in measured {
@@ -344,6 +364,16 @@ mod tests {
             let (lowest, highest) = (
                 runs.iter().cloned().fold(f64::INFINITY, f64::min),
                 runs.iter().cloned().fold(0.0, f64::max),
+            );
+            // Printed because the next re-fit needs to see the headroom, not just that the
+            // bounds held: a constant sitting at 1.00 against the highest run is one bad
+            // day from under-predicting, and one at 1.34 is one measurement from warning
+            // about runs that are fine.
+            println!(
+                "{name:>16}: predicted {:.3} GB   x{:.2} of highest, x{:.2} of lowest",
+                predicted / 1e9,
+                predicted / highest,
+                predicted / lowest
             );
             assert!(
                 predicted >= highest,
