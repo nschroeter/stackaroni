@@ -23,6 +23,26 @@ version in `Cargo.toml`.
 
 ## [Unreleased]
 
+### 🔬 Quality
+
+**filter, fusion** — the windowed sums behind salience run across threads, and fusion is a
+third faster. Measured on blossom, 100 frames of 8664x5784 16-bit RGB: **fuse 114 s → 71 s,
+whole run 205 s → 160 s.**
+
+`box_sum` was the largest single cost in fusion and the only serial one left: profiled, it
+was **48.7% of the fuse stage's wall time on one thread while thirteen others waited**, and
+its vertical pass walked columns at stride `width`, pulling a cache line per four bytes
+used. Rows are now summed in parallel, and columns in blocks of 256 that sweep downwards
+with one accumulator each, so source and destination are both read forwards.
+
+**Fused output is byte-identical**: the pinned regression hash did not move, and a
+100-frame blossom result compares equal byte for byte against one produced before the
+change. Every column's running sum is still accumulated in the same order — float addition
+is not associative, so a faster reduction over a different order would have changed the
+image.
+
+Peak memory is structurally unchanged: two planes are live at once, as before.
+
 ### 🚀 Features
 
 **Windows gets a real menu bar** — the same Help menu macOS has beside the Apple logo,
