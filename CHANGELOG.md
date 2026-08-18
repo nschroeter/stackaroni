@@ -21,27 +21,7 @@ here, for the same reason `parameters_doc.rs` exists.
 version being cut — which is the one step that must not be forgotten when raising the
 version in `Cargo.toml`.
 
-## [Unreleased]
-
-### 🔬 Quality
-
-**Fusion is a further 10% faster and 0.5 GB smaller, output unchanged.** Building a
-band-pass pyramid level expanded the level below it into a full-resolution image, then
-subtracted that image and dropped it — about 1.2 GB of traffic per frame at 50 MP for a
-value used exactly once. The expansion now hands its samples straight to the subtraction.
-Measured on blossom, 100 frames, alternating against the previous build: **fuse 49-52 s →
-44-46 s, peak 3.8-4.3 GB → 3.4-3.6 GB**, with no run of one overlapping the other. Pixels
-identical, confirmed with `tiffcmp`.
-
-**The memory estimate is re-fitted to what the pipeline now costs.** Fusion stopped copying
-planes in 1.2.0, so striped stacks peak at 4.4-4.7 GB where the model still expected
-6.2-6.3 GB, and it over-predicted them by around 40%. That direction is the safe one — the
-estimate exists to warn before a run thrashes, and it never under-predicted — but a model
-that over-warns eventually gets ignored. All four calibration configurations were
-re-measured and the two fitted constants moved with them.
-
-Single-strip stacks are unchanged, as expected: their peak is registration holding decoded
-frames, which that work never touched.
+## [1.2.1] — 2026-08-18
 
 ### 🩹 Fixes
 
@@ -61,6 +41,29 @@ describe a curve the pipeline does not use.
 run. The regression gate now hashes decoded pixels rather than file bytes, because adding
 metadata moved a hash whose whole purpose is to catch pipeline changes; it separately
 asserts the profile is present.
+
+### 🔬 Quality
+
+**Fusion is another 10% faster and half a gigabyte smaller, with output unchanged.**
+Building a band-pass pyramid level expanded the level below it into a full-resolution image,
+then subtracted that image and dropped it — about 1.2 GB of traffic per frame at 50 MP for a
+value used exactly once. The expansion now hands its samples straight to the subtraction.
+Measured on blossom, 100 frames, alternating against 1.2.0: **fuse 49-52 s → 44-46 s, peak
+3.8-4.3 GB → 3.4-3.6 GB**, with no run of one build overlapping the other. Pixels identical,
+confirmed with `tiffcmp`.
+
+Since this morning's 1.2.0, that puts fusion at **44-46 s against 114 s** on the same stack,
+at **3.4-3.6 GB against 5.9 GB**, with the fused image identical to the pixel throughout.
+
+**The memory estimate is re-fitted to what the pipeline now costs.** Fusion's live set
+shrank twice over these two releases, so the calibration fixtures now peak at 3.6-3.9 GB
+where the model still expected 6.2-6.3 GB. Over-predicting is the safe direction — the
+estimate exists to warn before a run thrashes, and it never under-predicted — but a model
+that over-warns eventually gets ignored. All four configurations were re-measured and the
+fitted constants moved with them.
+
+Single-strip stacks are unchanged, as expected: their peak is registration holding decoded
+frames, which none of this work touched.
 
 ## [1.2.0] — 2026-08-18
 
