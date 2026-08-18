@@ -21,44 +21,7 @@ here, for the same reason `parameters_doc.rs` exists.
 version being cut — which is the one step that must not be forgotten when raising the
 version in `Cargo.toml`.
 
-## [Unreleased]
-
-### 🔬 Quality
-
-**filter, fusion** — the windowed sums behind salience run across threads, and fusion is a
-third faster. Measured on blossom, 100 frames of 8664x5784 16-bit RGB: **fuse 114 s → 71 s,
-whole run 205 s → 160 s.**
-
-`box_sum` was the largest single cost in fusion and the only serial one left: profiled, it
-was **48.7% of the fuse stage's wall time on one thread while thirteen others waited**, and
-its vertical pass walked columns at stride `width`, pulling a cache line per four bytes
-used. Rows are now summed in parallel, and columns in blocks of 256 that sweep downwards
-with one accumulator each, so source and destination are both read forwards.
-
-**Fused output is byte-identical**: the pinned regression hash did not move, and a
-100-frame blossom result compares equal byte for byte against one produced before the
-change. Every column's running sum is still accumulated in the same order — float addition
-is not associative, so a faster reduction over a different order would have changed the
-image.
-
-**Peak memory fell with the time rather than paying for it.** Striped blossom peaks at
-**4.2-4.4 GB against 5.8-5.9 GB** before these three changes, measured alternating against
-a rebuilt older binary on the same machine. Stacks whose peak is registration rather than
-fusion — single-strip input — are unchanged, as expected.
-
-**fusion** — pyramid levels are moved rather than copied, taking fusion to **47 s** on the
-same stack. Building one Laplacian pyramid used to copy the full-resolution frame twice —
-once as the base of the Gaussian pyramid, once as the image each band is subtracted from —
-about 1.2 GB of memcpy per frame at 50 MP, both copies dropped moments later.
-`gaussian_pyramid` and `laplacian_pyramid` now take their input by value and hand each
-level into the band it becomes. Output byte-identical, same hash, same bytes.
-
-**fusion** — the weight plane is reduced straight from its mapped rows, taking fusion to
-**60 s** on the same stack. Selection fusion needs each frame's weights at the coarsest
-pyramid level only, and it was copying the full-resolution plane into an owned image
-first — an allocation and a 200 MB memcpy per frame that nothing else ever read. The
-pages still fault in, which is the part that is real work. Output byte-identical again,
-same hash, same bytes.
+## [1.2.0] — 2026-08-18
 
 ### 🚀 Features
 
@@ -72,6 +35,38 @@ eframe creates X11/Wayland surfaces directly, so there is no gtk window to attac
 Linux desktops expect the menu drawn in-window anyway. The toolbar menu is also the
 fallback on Windows if the install fails, so no platform can end up with no way to reach
 About or the parameter reference.
+
+### 🔬 Quality
+
+**Fusion is 2.4x faster and uses a quarter less memory, and every pixel it produces is
+unchanged.** Measured on blossom, 100 frames of 8664x5784 16-bit RGB: **fuse 114 s → 47 s,
+whole run 205 s → 109 s, peak memory 5.8-5.9 GB → 4.2-4.4 GB.** Ruler produced its result
+in 133 s against 197 s. All three test stacks were re-run and verified byte-identical to
+1.1.1 output, then re-rated 5 / 5 / 5 against the quality checklist. Three changes, all
+removing overhead rather than approximating anything:
+
+- **`box_sum`, the windowed sums behind salience, runs across threads.** Profiled, it was
+  **48.7% of the fuse stage on one thread while thirteen others waited**, and its vertical
+  pass walked columns at stride `width`, pulling a cache line to use four bytes of it. Rows
+  are now summed in parallel and columns in blocks of 256 that sweep downwards with one
+  accumulator each, so source and destination are both read forwards.
+- **The weight plane is reduced straight from its mapped rows.** Selection fusion needs
+  each frame's weights at the coarsest pyramid level only, and it was copying the
+  full-resolution plane into an owned image first — an allocation and a 200 MB memcpy per
+  frame that nothing else ever read.
+- **Pyramid levels are moved rather than copied.** Building one Laplacian pyramid copied
+  the full-resolution frame twice — as the base of the Gaussian pyramid, and as the image
+  each band is subtracted from — about 1.2 GB per frame at 50 MP, both copies dropped
+  moments later.
+
+**Why "byte-identical" is the headline rather than a footnote.** Float addition is not
+associative, so the obvious faster shapes — reassociating a running sum, splitting a
+column's accumulator across threads — would each have changed the image. Every column and
+every kernel tap is still summed in the order it was, which is what lets the ratings above
+carry over rather than needing to be earned again.
+
+**Stacks whose peak is registration rather than fusion — single-strip input — are
+unchanged**, in both time and memory, as expected.
 
 ### 📖 Docs
 
