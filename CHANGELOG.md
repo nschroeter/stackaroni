@@ -25,6 +25,14 @@ version in `Cargo.toml`.
 
 ### 🔬 Quality
 
+**Fusion is a further 10% faster and 0.5 GB smaller, output unchanged.** Building a
+band-pass pyramid level expanded the level below it into a full-resolution image, then
+subtracted that image and dropped it — about 1.2 GB of traffic per frame at 50 MP for a
+value used exactly once. The expansion now hands its samples straight to the subtraction.
+Measured on blossom, 100 frames, alternating against the previous build: **fuse 49-52 s →
+44-46 s, peak 3.8-4.3 GB → 3.4-3.6 GB**, with no run of one overlapping the other. Pixels
+identical, confirmed with `tiffcmp`.
+
 **The memory estimate is re-fitted to what the pipeline now costs.** Fusion stopped copying
 planes in 1.2.0, so striped stacks peak at 4.4-4.7 GB where the model still expected
 6.2-6.3 GB, and it over-predicted them by around 40%. That direction is the safe one — the

@@ -163,7 +163,26 @@ pub fn reduce_data(data: &[f32], width: u32, height: u32, channels: usize) -> Bi
 /// replicates an inserted zero instead of a real sample and brightens the edge by
 /// half.
 pub fn expand(src: &Bitmap, width: u32, height: u32) -> Bitmap {
+    let mut out = Bitmap::new(width, height, src.channels);
+    expand_into(src, &mut out, |slot, value| *slot = value);
+    out
+}
+
+/// Expand `src` to `dst`'s size, combining each expanded sample into `dst` in place.
+///
+/// **This exists so a band-pass level never has to be materialised.** Building one costs
+/// `band - expand(coarser)`, and writing that expansion to its own image first spends a
+/// full-resolution allocation, a pass to fill it and a pass to read it back — ~1.2 GB of
+/// traffic per frame at 50 MP for a value used exactly once. Handing the subtraction in
+/// means the expanded sample is consumed where it is computed.
+///
+/// `combine` receives the destination slot and the expanded sample, in that order, so the
+/// caller decides the operation *and its operand order* — `*slot -= value` is not
+/// `value - *slot`, and float subtraction does not forgive the difference.
+fn expand_into(src: &Bitmap, dst: &mut Bitmap, combine: impl Fn(&mut f32, f32) + Sync) {
     let c = src.channels;
+    let (width, height) = (dst.width, dst.height);
+    debug_assert_eq!(c, dst.channels, "expand cannot change the channel count");
     let wide_row = width as usize * c;
 
     let mut wide = Bitmap::new(width, src.height, c);
@@ -181,21 +200,26 @@ pub fn expand(src: &Bitmap, width: u32, height: u32) -> Bitmap {
             }
         });
 
-    let mut out = Bitmap::new(width, height, c);
-    out.data
+    debug_assert_eq!(dst.data.len(), wide_row * height as usize);
+    debug_assert!(c <= 4, "channels beyond RGBA are not expected");
+    dst.data
         .par_chunks_mut(wide_row)
         .enumerate()
         .for_each(|(y, dst)| {
             let j = (y / 2) as i64;
+            // One pixel of scratch, so the expanded sample never needs an image of its own.
+            let mut sample = [0f32; 4];
             for x in 0..width as usize {
                 let tap = |o: i64, ch: usize| {
                     let sy = o.clamp(0, wide.height as i64 - 1) as usize;
                     wide.data[(sy * width as usize + x) * c + ch]
                 };
-                expand_phase(&mut dst[x * c..][..c], y % 2 == 0, j, tap);
+                expand_phase(&mut sample[..c], y % 2 == 0, j, tap);
+                for (slot, &value) in dst[x * c..][..c].iter_mut().zip(&sample[..c]) {
+                    combine(slot, value);
+                }
             }
         });
-    out
 }
 
 /// One output pixel of `expand`, all channels: the even phase takes `[1,6,1]/8`
@@ -242,10 +266,7 @@ pub fn laplacian_pyramid(base: Bitmap, levels: usize) -> Vec<Bitmap> {
             pyramid.push(band);
             break;
         };
-        let up = expand(coarser, band.width, band.height);
-        for (v, u) in band.data.iter_mut().zip(&up.data) {
-            *v -= u;
-        }
+        expand_into(coarser, &mut band, |slot, value| *slot -= value);
         pyramid.push(band);
     }
     pyramid

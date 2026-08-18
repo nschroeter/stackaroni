@@ -78,7 +78,13 @@ const FUSION_PLANES: u64 = 3;
 /// that a fitted stage multiplier absorbs whatever else is live at the time. It is
 /// calibration, not measurement of this stage in isolation, and a change anywhere in the
 /// pipeline can invalidate it.
-const WEIGHT_BAND_BUFFERS: u64 = 32;
+///
+/// **32 → 28 the same day, for the same reason again**: fusion stopped materialising each
+/// expanded pyramid level, striped peak fell from 4.41-4.71 GB to 3.61-3.95 GB, and this
+/// constant absorbed the difference once more. Two re-fits in one day, both driven by
+/// changes in a different stage, is the clearest evidence available that it is a
+/// whole-pipeline calibration wearing a stage's name.
+const WEIGHT_BAND_BUFFERS: u64 = 28;
 
 /// Grid-sized buffers registration holds per thread, at its working pyramid level.
 ///
@@ -95,8 +101,9 @@ const REGISTRATION_GRID_BUFFERS: u64 = 39;
 /// the OS is writing back — which depends on the machine's overall memory pressure at the
 /// time. That state is an input to every measurement here and cannot be controlled for.
 ///
-/// Striped input barely drifts (6.255 -> 6.220..6.323 GB), because its peak is the weights
-/// stage's steady per-thread buffers. Single-strip drifts because its peak is registration's
+/// Striped input barely drifts — 6.220..6.323 GB then, 3.936..3.947 GB after the fusion
+/// work of 2026-08-18, a spread of ~0.01 GB either way — because its peak is steady
+/// per-thread and per-stage buffers. Single-strip drifts because its peak is registration's
 /// in-flight readers, whose overlap varies.
 ///
 /// Without this margin the fitted model under-predicted the next day's measurement of the
@@ -344,15 +351,16 @@ mod tests {
         // readers — untouched by that work, and the wider spread is real drift worth
         // keeping.
         let measured: [(&str, u64, usize, &[f64]); 4] = [
-            ("striped 8", STRIPED, 8, &[4.409e9, 4.416e9]),
-            ("striped 33", STRIPED, 33, &[4.697e9, 4.706e9]),
+            ("striped 8", STRIPED, 8, &[3.613e9, 3.633e9]),
+            ("striped 33", STRIPED, 33, &[3.936e9, 3.947e9]),
             ("single-strip 8", SINGLE_STRIP, 8, &[5.716e9, 5.783e9]),
             (
                 "single-strip 33",
                 SINGLE_STRIP,
                 33,
                 &[
-                    10.096e9, 10.958e9, 10.953e9, 11.094e9, 11.329e9, 9.783e9, 10.682e9,
+                    10.096e9, 10.958e9, 10.953e9, 11.094e9, 11.329e9, 9.783e9, 10.682e9, 9.723e9,
+                    11.050e9,
                 ],
             ),
         ];
