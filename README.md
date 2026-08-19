@@ -1,7 +1,7 @@
 # Stackaroni
 
-Focus stacking for insect macro photography. Rust, `egui`, single binary, no runtime
-dependencies.
+Focus stacking for insect macro photography. Rust, `egui`, native binaries — no interpreter
+or runtime to install.
 
 Takes a folder of 16-bit TIFF frames shot at stepped focus distances and produces one
 image with everything sharp — aligning the frames, measuring where each is in focus, and
@@ -52,7 +52,7 @@ registration  →  focus measurement  →  weight estimation  →  fusion
   selection rule of Burt & Kolczynski (1993).
 
 Frames are streamed rather than loaded: a 100-frame 50 MP stack never sits in memory at
-once. A full run on that size takes about 4½ minutes.
+once. A full run on that size takes about two minutes.
 
 ## Building from source
 
@@ -134,8 +134,8 @@ A fixed set of test stacks lives in `test-data/` (gitignored — they are hundre
 run against all of them, rated, and recorded in [`docs/eval-log.md`](docs/eval-log.md)
 with the commit hash.
 
-A hash gate (`crates/core/tests/output_is_stable.rs`) pins the fused output of one stack
-byte-for-byte, so a change claiming to be a pure speedup can be checked rather than
+A hash gate (`crates/core/tests/output_is_stable.rs`) pins the decoded pixels of one
+stack's fused output, so a change claiming to be a pure speedup can be checked rather than
 believed.
 
 ## The eval log is the interesting part

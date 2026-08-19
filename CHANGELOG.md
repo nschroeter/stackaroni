@@ -21,6 +21,19 @@ here, for the same reason `parameters_doc.rs` exists.
 version being cut — which is the one step that must not be forgotten when raising the
 version in `Cargo.toml`.
 
+## [Unreleased]
+
+### 📖 Docs
+
+**README** — four claims corrected against the code. It was written on 2026-08-16 and not
+revisited, so three of them predate the T19-T26 work. "Single binary" was always two, as
+the same file says sixty lines further down. "No runtime dependencies" holds only in the
+no-interpreter sense — the Linux build needs libxkbcommon/wayland/X11/GL and glibc 2.39,
+which the README already stated elsewhere. A full 100-frame 50 MP run is about two minutes,
+not 4½: 109 s on blossom and 133 s on ruler, measured 2026-08-18, with T26 cutting fusion
+further still. And the hash gate has pinned decoded pixels rather than file bytes since
+T24 embedded an sRGB ICC profile.
+
 ## [1.2.1] — 2026-08-18
 
 ### 🩹 Fixes
