@@ -1,7 +1,8 @@
 # Project overview
 
 A focus-stacking application for insect macro photography. Rust + egui/eframe, cross-platform
-(macOS primary, Windows, Linux), single-binary distribution. I (the human) rate output image
+(macOS primary, Windows, Linux), distributed as native binaries with no runtime to install —
+a GUI and a headless CLI, one archive per platform. I (the human) rate output image
 quality; there is no automated ground truth, so treat my ratings and the checklist below as the
 source of truth for "correct."
 
@@ -64,7 +65,7 @@ why the T11 fusion rows did not invalidate the T7 guided-filter measurements, an
 future registration change will not invalidate any fusion rating.
 
 **The stage-3/stage-4 boundary leaks, in the shipped default — know this before relying on
-the independence claim above.** `SelectionFusion::fuse` (`crates/core/src/fusion.rs:491`)
+the independence claim above.** `SelectionFusion::fuse` (`crates/core/src/fusion.rs`)
 consumes the `weights` argument for the *coarsest* pyramid level only. Every band-pass level
 is decided inside `fuse` by `select_more_salient`, which computes its own windowed salience
 over the Laplacian coefficients — so under `select`, the weight maps `GuidedWeights`
@@ -137,8 +138,10 @@ breaking change.
 
 Checks go at per-frame granularity inside `weights` and `fuse` — plus `labels` and
 `normalize`, which are full banded passes over every plane before and after the per-frame
-loop. Worst-case stop latency is therefore about one frame of fusion, ~6 s on a 50 MP
-stack, measured at 6.82 s on blossom.
+loop. Worst-case stop latency is therefore about one frame of fusion — ~0.45 s on a 50 MP
+stack, from blossom's 44-46 s fuse over 100 frames. **It was 6.82 s when this was written
+and that figure survived three fusion speedups**; a latency quoted in seconds is a quotient
+of a stage time that keeps changing, so re-derive it rather than trusting the number here.
 
 **Parallelism changed what cancellation guarantees, in the stages that went wide.** Where a
 loop runs across threads, every frame already in flight finishes before the flag is seen, so
@@ -147,7 +150,7 @@ deliberately so: its per-frame loop stays sequential, because float addition int
 accumulator is not associative and going wide there would change the output. That is also
 why fusion's cancellation tests can still pin an exact frame and the weights test cannot. **Sub-frame checks were considered and deliberately left out:** responsiveness is
 dominated by whether the UI acknowledges the click immediately, not by true stop latency,
-and a 6 s tail on a 20-minute operation reads as normal. Revisit only if it actually feels
+and a sub-second tail on a two-minute operation reads as normal. Revisit only if it actually feels
 slow. Never check inside the final `write_rgb16_srgb` — a truncated TIFF that looks like a
 real output is worse than finishing the write.
 
@@ -168,7 +171,7 @@ the widest parallelism that stays under `max(16 GB, 25% of RAM)`, clamped to 90%
 about it are load-bearing. **It is a `max` over stages, never a sum**, because stages run in
 sequence and the measurements prove a summing model over-predicts by nearly 2x. And **it warns
 rather than refuses** — the CLI takes `--ignore-memory-limit`, the app offers "Run anyway" — because
-three of its constants are fitted to four measured runs rather than derived, so it can be wrong in
+three of its constants are fitted to measured runs rather than derived, so it can be wrong in
 either direction. The gate that keeps it honest is `the_estimate_brackets_every_measured_run`: clear the *highest*
 measurement of each configuration, stay within 35% of the *lowest*. Adding a stage, or changing what
 one allocates per thread, means re-fitting against that test rather than reasoning about it.
@@ -296,6 +299,9 @@ Rate every candidate output against this list (this is my rubric, not a proxy me
   implementing or changing registration, focus measurement, or fusion.
 - `docs/eval-log.md` — running log of experiments and scores. Create it if it doesn't exist yet;
   append to it, don't overwrite history.
+- `docs/PARAMETERS.md` — every exposed parameter: what it does, which stage it belongs to, what
+  moving it costs. `crates/core/tests/parameters_doc.rs` fails the build if it drifts from
+  `core::defaults`, so a new parameter means a section here in the same change.
 
 # Build & test
 
