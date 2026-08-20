@@ -221,15 +221,17 @@ of 1.08M. So a graph-cut weight refiner would refine weights that barely reach t
 and a better focus measure would feed weights that barely reach the output. **Neither is
 worth building against `select` without first changing what consumes them.** The leverage
 is in stage 4 — the selection rule itself or its salience measure — which is also where the
-7.6-effective-frames figure is actually decided.
+effective-frames figure is actually decided.
 
 **The search for a second method is closed (T17b).** Three attempts have failed: wavelet
 2/4/2, the published DSE fix measured inert, and depth-map weights 2/3/1 — each against
 `local`'s 5/5/5, which itself beat a mature commercial PMax. **Do not start a fourth
-without reading the T14, T16, T17 and T17b rows.** What remains open are measured gaps
-*inside* `local`: ~7.6 effective frames averaged per pixel against an ideal of 1-3, and
-detail at 91% of the per-pixel oracle on synthetic_50. Those are improvements to a method
-that works, not replacements for it.
+without reading the T14, T16, T17 and T17b rows.** What remains open is one measured gap
+*inside* `local`: detail at 91% of the per-pixel oracle on synthetic_50 — an improvement to
+a method that works, not a replacement for it. **The other gap this paragraph named until
+2026-08-20, ~7.6 effective frames per pixel against an ideal of 1-3, is closed**: 7.6 was
+measured under `blend`, and the shipped `select` output averages 0.82 — one frame, which was
+the target. See the 2026-08-19 row.
 
 **Multi-scale focus measurement is a closed dead end, not an open option (T12).** It was
 built in full and measured inert on this pipeline — detail 0.330 at *every* scale count and
