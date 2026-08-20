@@ -21,7 +21,13 @@ here, for the same reason `parameters_doc.rs` exists.
 version being cut — which is the one step that must not be forgotten when raising the
 version in `Cargo.toml`.
 
-## [Unreleased]
+## [1.2.2] — 2026-08-20
+
+**Nothing in the binary changed.** No pipeline stage, no parameter, no output — the fused
+result is byte-identical to 1.2.1 and the pinned pixel hash did not move. This release
+exists because two of the documents shipped alongside the binaries had drifted from the
+code, and a wrong number in `PARAMETERS.md` is worth correcting even when nothing else is.
+Upgrading gains you accurate documentation and no behaviour.
 
 ### 📖 Docs
 
