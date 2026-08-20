@@ -143,15 +143,14 @@ geometry and no visible defect. **The streaking is content-dependent, not
 geometry-dependent**: smooth margins expose replicated pixels, textured margins outcompete
 them.
 
-**There are now two pipeline shapes, not one (T14).** `core::pipeline::Method` selects
-between `Local` — registration → focus → weights → pyramid fusion, the four stages every
-rating below was given to — and `Wavelet`, which keeps registration and collapses the other
-three into coefficient selection (`docs/algorithms.md` §5). **`Local` is still the default
-and is byte-identical**: `output_is_stable` still hashes synthetic_50 to
-`0x00455c66dd1e4c95`, so **no rating below is affected**. Wavelet is `--method wavelet` and
-a "Method" combo box in the app. **Rated under `wavelet`: ruler 5, synthetic_50 5, and —
-after T15 removed the margin streaking found while reviewing it — blossom 5.** Wavelet now
-matches `local` on every stack in the set.
+**Deleted on 2026-08-20: a T14-era paragraph describing "two pipeline shapes".** It
+described `core::pipeline::Method`, `--method wavelet` and the app's Method combo box as
+live, quoted a two-generations-stale hash, and closed with "wavelet now matches `local` on
+every stack" — a claim the block already contradicts above, since wavelet was re-rated
+2 / 4 / 2 on a clean set and removed in T17. Nothing in it was still true. Recorded rather
+than silently dropped because it is the clearest example of what this block goes wrong at:
+paragraphs were appended as things changed and the superseded ones were never pruned, so a
+T14 description sat below a T26 one describing the same code.
 
 **The frame-margin streaking is `warp_frame`'s border clamp reaching fusion, not either
 fusion rule's own doing, and it is fixed in T15.** Coloured stripes along the top and right margins, ~230 px in at the sides and ~156
@@ -166,16 +165,21 @@ clean to the last pixel, at scale 0.930 relative to ours — i.e. anchored so th
 frame covers the canvas. Fix is T15. **This supersedes the T14 row's "pre-existing warp
 behaviour" note**, which was correct that wavelet did not introduce it and silent on why.
 
-**The four-stage decomposition is now known not to be universal.** Wavelet needed a fifth
-trait, `StackFusion`, because there is no per-frame `FocusMap` to hand a `WeightEstimator`
-and no `WeightMaps` to hand an `ImageFusion` — the quantities live in a coefficient domain
-neither type can represent. Registration stayed outside it and is still shared. See the
-stage-boundary note in `CLAUDE.md`, which also records that `Select` already re-measures
-salience inside `fuse` and uses the weight maps only at the coarsest level.
+**The four-stage decomposition is known not to be universal — a finding that outlived the
+code that produced it.** Wavelet *needed* a fifth trait, `StackFusion`, because there was no
+per-frame `FocusMap` to hand a `WeightEstimator` and no `WeightMaps` to hand an
+`ImageFusion` — the quantities lived in a coefficient domain neither type can represent.
+Registration stayed outside it and was still shared. **`StackFusion` was removed with the
+method in T17, so this survives only as this paragraph, the T14/T17 rows and the
+stage-boundary note in `CLAUDE.md`** — which also records that `select` re-measures salience
+inside `fuse` and uses the weight maps only at the coarsest level. Expect to reintroduce
+something like it if a future method collapses the stages again; do not expect to find it in
+the tree.
 
 **The fusion rule is one type as of T13** — `core::fusion::FusionKind`, a data-carrying enum
 owning construction, each rule's own parameters, and the CLI token / UI label / trade-off
-summary. **The app offers only `Local` (selection); `blend` is CLI-only.** The CLI's `FusionArg`, the app's
+summary. **The app offers only `select`; `blend` is CLI-only.** (`Local` was the wavelet-era
+name for the whole non-wavelet pipeline and went with it in T17.) The CLI's `FusionArg`, the app's
 `FusionRule` and `Settings.select_fusion` are gone. `--fusion select|blend` is unchanged, so
 every row below still reproduces. `the_app_and_the_cli_agree_byte_for_byte` now holds the
 app and the CLI to identical bytes on both rules.
@@ -186,16 +190,20 @@ phase-correlation similarity at level 3, chained outward from the middle frame; 
 floor 32 px. **Every row above the T11 rows was produced by the blend and now needs an
 explicit `--fusion blend` to reproduce.**
 
-**Current outputs** — `target/debug-out/t11/{blossom_select,ruler_select,synthetic_50_select}.tif`.
-Comparison crops: `t11/crops/` (blossom, `blend | select | pmax`), `t11/crops-ruler/`
-(`blend | select`), `t11/crops-synthetic/` (`blend | select | truth`). The older
+**Current outputs** — the newest full eval is `target/debug-out/t23-eval/`, the 2026-08-18
+re-run on all three stacks after the T20-T22 speed work. `t11/` holds the outputs the
+fusion-rule flip was rated on and its `blend | select | pmax` comparison crops, which is
+what to read for *why* `select` won, not for what the pipeline produces now. The older
 `test-data/<stack>/stackaroni_fused.tif` and `t10/` outputs are **blend** results and are
-now superseded.
+superseded. **All of these live under `target/`, so they are machine-local and a `cargo
+clean` away from gone** — re-run the eval rather than assuming they are present.
 
 **Rated, all three stacks, under `select`** — **blossom 5** (was 1, and better than the
-Zerene PMax reference), **ruler 5** (was 3), **synthetic_50 4** (was 5). Nothing is
-currently awaiting a human score. **Not a clean sweep — see the trade-off row; do not
-summarize it as one.**
+Zerene PMax reference), **ruler 5** (was 3), **synthetic_50 5**. Nothing is currently
+awaiting a human score. **synthetic_50 dropped to 4 on the T11 flip and was re-rated 5 on
+the verified-clean set on 2026-08-15** — the "not a clean sweep" caution this paragraph used
+to carry was about that 4 and no longer applies; the trade-off row still records what the
+flip cost at the time.
 
 **Closed: synthetic_50's residual antenna softness was the fixture, not the pipeline.**
 Human User's direct read — it is the staircase aliasing in the ground-truth render, the same
@@ -244,12 +252,14 @@ opening paragraph as an outstanding idea** — it is the argument that motivated
 did not survive contact with the test stacks. A revisit means **scale-normalized** levels
 (Lindeberg 1998), which is a different algorithm on a new branch, not this code retuned.
 
-**Runtime** — a 100-frame 50 MP stack takes **~4.4 minutes**, down from ~20.4. Fusion is
-62% of that and the least parallel of the four stages, deliberately: its per-frame loop
-stays sequential to keep float ordering, so only its inner loops went wide. **Any change
-to a pipeline stage must keep `tests/output_is_stable.rs` passing** — it hashes the fused
-output of synthetic_50 and is what makes "this is only a speedup" checkable rather than
-asserted.
+**Runtime** — a 100-frame 50 MP stack takes **about two minutes**: blossom 109 s and ruler
+133 s on 2026-08-18, down from ~20.4 minutes originally and ~4.4 before T20-T22. **Fusion is
+no longer the dominant stage** — 42 s of blossom's 109 s against the weights stage's 43 s,
+where it was 62% of the run before `box_sum` went parallel in T20. Its per-frame loop is
+still sequential on purpose, to keep float ordering; only its inner loops are wide. **Any
+change to a pipeline stage must keep `tests/output_is_stable.rs` passing** — it hashes the
+fused output of synthetic_50 and is what makes "this is only a speedup" checkable rather
+than asserted.
 
 **Colour noise is closed as a fusion question.** `select`'s chroma noise is one source
 frame's, passed through — not manufactured by per-channel or cross-level selection, both
@@ -298,10 +308,12 @@ and for why the synthetic fixture that suggested otherwise is not to be trusted.
 high-frequency energy measure settles a sharpness question on noisy data.** In T17b the
 depth-map output measured 2.3x the Laplacian SD of the blended one and was reported as
 "sharper-looking"; Human User rated the same file 1/5, completely unsharp. The metric was
-counting grain. Seven measurement errors so far: four overstating a defect, one
-asserting a defect that did not exist, and one (the antenna softness) measuring a property
-of the *fixture* rather than of the output, repeatedly, after the fixture's artifact had
-already been named and excluded from the score. A claim of a *new* defect needs both a
+counting grain. Measurement errors so far: four overstating a defect, one asserting a defect
+that did not exist, and one (the antenna softness) measuring a property of the *fixture*
+rather than of the output, repeatedly, after the fixture's artifact had already been named
+and excluded from the score. (**This read "seven" against a breakdown of six until
+2026-08-20.** The total was not re-derived — counting them means auditing every row — so the
+enumeration above is the claim and there is no headline number to quote.) A claim of a *new* defect needs both a
 measurement and a look at the image before it goes in the log — and, on the synthetic
 stack, a check against `test-data/README.md`'s known quirks first.
 
