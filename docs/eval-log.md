@@ -21,6 +21,17 @@ further down. Updating the block is part of logging, not a follow-up. A row
 changes what is live when it: ships a new parameter set, retracts or
 supersedes an earlier claim, or resolves an open question.
 
+**Two of the block's claims are enforced by a test; the rest are on you.**
+`crates/core/tests/eval_log_current_state.rs` fails the build if the "Live
+configuration" paragraph disagrees with `core::defaults`, or if the output
+hash the block quotes is not the one `output_is_stable.rs` pins. Those are
+the two things written down in both places. **Ratings, run times and
+descriptions of removed features are not checkable and have all gone stale
+before** — an audit on 2026-08-20 found nine such claims, the oldest
+describing a `Method` enum and a `StackFusion` trait that T17 had deleted
+five days earlier. If a change makes one of those wrong, only a reader will
+catch it.
+
 Score is 1-5 against the quality checklist in `CLAUDE.md`:
 
 1. No visible seams/halos around high-contrast edges (antennae, legs, hair boundaries)
