@@ -24,7 +24,7 @@ For insect macro photography, focus stacking is best treated as two related prob
 | Approach | Quality | Speed | Robustness | Macro suitability |
 |---|---|---|---|---|
 | Single-scale gradient/Laplacian measure + direct pyramid blending (baseline) | ★★★★☆ | ★★★★★ | ★★★☆☆ | Good baseline |
-| Wavelet-domain stacking | ★★★★☆ | ★★★★☆ | ★★★★☆ | Very good |
+| Wavelet-domain stacking | ★★★★☆ | ★★★★☆ | ★★★★☆ | **Rated 2 / 4 / 2 here and removed — see §5** |
 | Multi-scale Laplacian-pyramid fusion (integrated measure + blend, full pipeline) | ★★★★★ | ★★★★☆ | ★★★★☆ | Excellent |
 | Graph-cut / MRF weight refinement | ★★★★★ | ★★☆☆☆ | ★★★★★ | Excellent; complex |
 | Guided / edge-aware weight refinement | ★★★★★ | ★★★☆☆ | ★★★★★ | Excellent |
@@ -163,7 +163,14 @@ distinct fusion rule from the weighted average, and stackaroni initially impleme
 the average. This section records the difference, because it is the leading candidate for
 fixing the blossom result (rated 1/5 at `e2e6b8a`).
 
-**What is currently implemented (T8).** One weight map per frame, produced by T6 focus
+> **Status: selection shipped and is the default.** This section was written while it was
+> still a proposal, and the tenses below reflect that. T11 built it and it was rated against
+> blend on all three stacks — blossom 1 → 5, ruler 3 → 5, synthetic_50 5 → 4 — so
+> `--fusion select` became the default at `2fbf990`. Read
+> "currently implemented" below as "implemented at the time of writing"; `blend` is now the
+> CLI-only alternative, kept for reproducing eval-log rows from before the flip.
+
+**What was implemented when this was written (T8).** One weight map per frame, produced by T6 focus
 measurement and T7 guided-filter refinement, is Gaussian-reduced to each pyramid level and
 used to blend:
 
@@ -330,21 +337,23 @@ Keep the registration, focus metric, weight estimation and fusion stages indepen
 
 **Addition:** the original trait sketch omitted registration despite Section 10 arguing it deserves equal attention to fusion. Added below.
 
+**Updated to the shipped signatures.** The sketch below is what `crates/core/src/pipeline.rs` actually declares, not a proposal — it acquired three things the original omitted, and an implementer copying the older form would not compile. `CLAUDE.md` carries the reasoning for each; in brief: `Sync` because `register_stack` and `evaluate_stack` run their stages across threads, `run: &dyn RunControl` because cancellation and progress are properties of the call rather than of the stage, and `Result` because `core` is a library boundary whose callers must tell a decode failure from a cancellation.
+
 ```rust
-trait Registration {
-    fn align(&self, reference: &Image, target: &Image) -> Transform;
+trait Registration: Sync {
+    fn align(&self, reference: &Image, target: &Image, run: &dyn RunControl) -> Result<Transform>;
 }
 
-trait FocusMetric {
-    fn evaluate(&self, image: &Image) -> FocusMap;
+trait FocusMetric: Sync {
+    fn evaluate(&self, image: &Image, run: &dyn RunControl) -> Result<FocusMap>;
 }
 
-trait WeightEstimator {
-    fn weights(&self, focus_maps: &[FocusMap]) -> WeightMaps;
+trait WeightEstimator: Sync {
+    fn weights(&self, focus_maps: &[FocusMap], run: &dyn RunControl) -> Result<WeightMaps>;
 }
 
-trait ImageFusion {
-    fn fuse(&self, images: &[Image], weights: &WeightMaps) -> Image;
+trait ImageFusion: Sync {
+    fn fuse(&self, images: &[Image], weights: &WeightMaps, run: &dyn RunControl) -> Result<Image>;
 }
 ```
 
@@ -353,7 +362,7 @@ trait ImageFusion {
 - **Registration** — start with phase-correlation translation, then add ECC or feature-based affine registration.
 - **Multi-scale focus measurement** — benchmark Scharr, windowed-Laplacian and Tenengrad variants.
 - **Spatially coherent focus maps** — add edge-aware refinement and later evaluate MRF/graph-cut approaches.
-- **Laplacian-pyramid fusion** — use multi-scale blending rather than direct pixel selection.
+- **Laplacian-pyramid fusion** — use multi-scale blending rather than direct pixel selection. **Superseded by measurement, see §6b:** what shipped is per-level *selection* on windowed salience, which took blossom from 1 to 5. The advice holds against naive per-pixel selection, which is what it was written against; it does not hold against the windowed form.
 - **Artifact handling** — specifically test noise, halos, fine hairs, transparent structures and moving subjects.
 - **Performance** — design the pipeline for multithreading and later GPU acceleration.
 - **16-bit fidelity** — avoid unnecessary conversion through 8-bit and keep adequate precision internally (decode to f32 early, quantize back only on output).

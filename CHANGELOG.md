@@ -34,6 +34,12 @@ not 4½: 109 s on blossom and 133 s on ruler, measured 2026-08-18, with T26 cutt
 further still. And the hash gate has pinned decoded pixels rather than file bytes since
 T24 embedded an sRGB ICC profile.
 
+**`docs/PARAMETERS.md`** — two claims corrected, both about ratings rather than parameters,
+so no default moved. The guide-radius section quoted 7.6 effective frames per pixel against
+"an ideal of 1-3"; that was measured under `--fusion blend`, and on the shipped `select`
+output it is 0.82. And the fusion-rule section gave synthetic_50 as 5 → 4 under the T11
+flip without noting it has since been re-rated 5, so the live ratings are 5 / 5 / 5.
+
 ## [1.2.1] — 2026-08-18
 
 ### 🩹 Fixes

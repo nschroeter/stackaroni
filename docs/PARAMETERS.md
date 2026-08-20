@@ -73,8 +73,13 @@ physical maximum.
 
 Effective frames is the clearest single readout of how selective the weights are: noise
 falls as the square root of the number of frames averaged, so the drop in background noise
-says how many frames each pixel is really made of. The ideal is 1–3, so 7.6 still leaves
-headroom.
+says how many frames each pixel is really made of. The ideal is 1–3.
+
+**Those numbers were measured under `--fusion blend` and do not describe the default.**
+Re-measured on the shipped `select` output (2026-08-19), `blossom` averages **0.82**
+effective frames — one frame, because selection takes a single frame's coefficients at each
+pyramid level by construction. The 25 → 7.6 improvement is a real measurement of the weight
+stage, and is why the radius is 4; it is not a statement about the fused image.
 
 ## Guide epsilon
 
@@ -102,7 +107,9 @@ maps.
 
 `select` is the default as of T11, on ratings across all three stacks: blossom **1 → 5**,
 ruler **3 → 5**, synthetic_50 **5 → 4**. One change to the fusion rule, no parameter
-retuning. `blend` remains available for reproducing eval-log rows from before that flip,
+retuning. **synthetic_50 has since been re-rated 5 on a verified-clean set (2026-08-15), so
+the live ratings are 5 / 5 / 5** — the 4 is what the flip itself cost, not where the stack
+sits now. `blend` remains available for reproducing eval-log rows from before that flip,
 and is CLI-only.
 
 **A consequence worth knowing:** under `select` the weight maps only reach the *coarsest*
