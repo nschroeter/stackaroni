@@ -21,6 +21,22 @@ here, for the same reason `parameters_doc.rs` exists.
 version being cut — which is the one step that must not be forgotten when raising the
 version in `Cargo.toml`.
 
+## [Unreleased]
+
+### 🩹 Fixes
+
+**The release archives now hold the documentation at its repository paths**, so the
+README's links work from an unpacked download. `PARAMETERS.md` was copied to the archive
+root while the README links to `docs/PARAMETERS.md`, and nothing else under `docs/` was
+included at all — which broke five of the README's six relative references, including both
+screenshots it opens with. Anyone reading it out of an archive got two broken images at the
+top of the page and dead links to the parameter reference and the eval log.
+
+The archive now mirrors the repository: `README.md`, `CHANGELOG.md`, `LICENSE` and the
+whole `docs/` tree. It adds about 530 KB to an 8-10 MB download. **Archives published
+before this, 1.2.2 included, keep the old flat layout** — the fix applies from the next
+release onward.
+
 ## [1.2.2] — 2026-08-20
 
 **Nothing in the binary changed.** No pipeline stage, no parameter, no output — the fused
