@@ -157,13 +157,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp README.md LICENSE docs/PARAMETERS.md dist/
+          # The docs tree keeps its repo paths, `docs/` and all, because README.md links
+          # into it relatively — `docs/PARAMETERS.md`, `docs/eval-log.md` and both
+          # `docs/images/*.jpg` screenshots it opens with. Flattening `PARAMETERS.md` into
+          # the top level, as this did until 1.2.2, broke five of the README's six relative
+          # references and left two broken images at the top of the page for anyone reading
+          # it out of an unpacked archive. Mirroring the repo costs ~530 KB against an 8-10
+          # MB archive and needs no second copy of the links to keep in step.
+          cp -R docs dist/
+          cp README.md LICENSE CHANGELOG.md dist/
           case "${{ runner.os }}" in
             macOS)   cp target/release/stackaroni-cli dist/ ;;
             Linux)   cp target/release/stackaroni-app target/release/stackaroni-cli dist/ ;;
             Windows) cp target/release/stackaroni-app.exe target/release/stackaroni-cli.exe dist/ ;;
           esac
-          ls -l dist
+          # Recursive, because `ls -l` alone would not show whether `docs/` arrived.
+          ls -lR dist
 
       # tar on the Unixes to keep the executable bit and the bundle's directory
       # structure; zip on Windows because that is what Explorer opens natively.

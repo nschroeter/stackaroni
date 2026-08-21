@@ -8,8 +8,9 @@
 | `stackaroni-@VERSION@-linux-x86_64.tar.gz` | Linux x86-64, glibc 2.39 or later (Ubuntu 24.04 and newer) |
 | `stackaroni-@VERSION@-windows-x86_64.zip` | Windows 10/11, x86-64 |
 
-Each archive holds the GUI, the `stackaroni-cli` headless runner, `README.md`,
-`PARAMETERS.md` and the licence. `SHA256SUMS` covers all three.
+Each archive holds the GUI, the `stackaroni-cli` headless runner, the licence, and the
+documentation at its repository paths — `README.md`, `CHANGELOG.md` and `docs/`, so the
+README's links and screenshots work from the unpacked folder. `SHA256SUMS` covers all three.
 
 ## ▶️ Running it
 
